@@ -10,6 +10,7 @@ import type {
   CompendiumSource,
   CustomResource,
   InventoryItem,
+  WeaponAttack,
 } from '../../shared/types.js';
 
 /**
@@ -76,6 +77,9 @@ export const characters = sqliteTable('characters', {
     .$defaultFn(() => ({
       savingThrows: [],
       skills: {},
+      skillBonuses: {},
+      globalSkillBonus: 0,
+      saveBonuses: {},
       weapons: [],
       weaponMasteries: [],
       armor: [],
@@ -92,6 +96,9 @@ export const characters = sqliteTable('characters', {
       hit_dice_current: 1,
       hit_dice_max: 1,
       hit_die_type: 'd8',
+      death_save_successes: 0,
+      death_save_failures: 0,
+      conditions: [],
       armor_class: 10,
       speed: 30,
     })),
@@ -104,11 +111,16 @@ export const characters = sqliteTable('characters', {
     .$type<InventoryItem[]>()
     .notNull()
     .$defaultFn(() => []),
+  weapon_attacks: text('weapon_attacks', { mode: 'json' })
+    .$type<WeaponAttack[]>()
+    .notNull()
+    .$defaultFn(() => []),
   spells: text('spells', { mode: 'json' })
     .$type<CharacterSpells>()
     .notNull()
     .$defaultFn(() => ({
       spellcastingAbility: null,
+      visibleSlotLevels: 1,
       slots: {},
       preparedSlugs: [],
       knownSlugs: [],

@@ -2,9 +2,98 @@
 @tailwind components;
 @tailwind utilities;
 
+@property --paper {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f8f5ee;
+}
+@property --ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #1c222d;
+}
+@property --card {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #efece6;
+}
+@property --muted {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #8c857b;
+}
+@property --stone {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #d6d1c7;
+}
+@property --sage {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #7e998a;
+}
+@property --ochre {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #d4a359;
+}
+@property --clay {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #c86d5b;
+}
+@property --sea {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4a7c9b;
+}
+@property --mist {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #9ba2b8;
+}
+
+:root {
+  --paper: #f8f5ee;
+  --ink: #1c222d;
+  --card: #efece6;
+  --muted: #8c857b;
+  --stone: #d6d1c7;
+  --sage: #7e998a;
+  --ochre: #d4a359;
+  --clay: #c86d5b;
+  --sea: #4a7c9b;
+  --mist: #9ba2b8;
+  color-scheme: light;
+  transition:
+    --paper 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --ink 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --card 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --muted 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --stone 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --sage 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --ochre 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --clay 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --sea 700ms cubic-bezier(0.4, 0, 0.2, 1),
+    --mist 700ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:root.night {
+  --paper: #1b2230;
+  --ink: #f6f1e8;
+  --card: #121722;
+  --muted: #b3a89a;
+  --stone: #3c465c;
+  --sage: #93b8a4;
+  --ochre: #e4bc72;
+  --clay: #e39282;
+  --sea: #7eb0c8;
+  --mist: #b0b8cc;
+  color-scheme: dark;
+}
+
 @layer base {
   :root {
-    color-scheme: light;
     font-variant-numeric: lining-nums tabular-nums;
   }
 
@@ -18,8 +107,8 @@
   }
 
   body {
-    background-color: #F8F5EE;
-    color: #1C222D;
+    background-color: var(--paper);
+    color: var(--ink);
     min-height: 100vh;
   }
 

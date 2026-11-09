@@ -160,6 +160,15 @@ export const DND55E_SKILLS: readonly SkillDefinition[] = [
 export const CharacterProficienciesSchema = z.object({
   savingThrows: z.array(AbilityKeySchema).default([]),
   skills: z.record(z.string(), ProficiencyRankSchema).default({}),
+  /**
+   * Extra flat bonus on top of ability, proficiency, and exhaustion.
+   * Edited per skill. The shared bonus from the "⋯" menu is `globalSkillBonus`.
+   */
+  skillBonuses: z.record(z.string(), z.number().int().min(-150).max(150)).default({}),
+  /** Shared flat bonus added to every skill. Shown on the "⋯" control. */
+  globalSkillBonus: z.number().int().min(-150).max(150).default(0),
+  /** Extra flat bonus on each saving throw, edited directly on the save row. */
+  saveBonuses: z.record(z.string(), z.number().int().min(-150).max(150)).default({}),
   weapons: z.array(z.string()).default([]),
   weaponMasteries: z.array(z.string()).default([]),
   armor: z.array(z.string()).default([]),
@@ -175,10 +184,34 @@ export const CharacterHpSchema = z.object({
   hit_dice_current: z.number().int().min(0).default(1),
   hit_dice_max: z.number().int().min(1).default(1),
   hit_die_type: z.enum(['d6', 'd8', 'd10', 'd12']).optional().default('d8'),
+  death_save_successes: z.number().int().min(0).max(3).default(0),
+  death_save_failures: z.number().int().min(0).max(3).default(0),
+  /** Active D&D 5.5e conditions. Cleared on a short or long rest. */
+  conditions: z.array(z.string()).default([]),
   armor_class: z.number().int().min(0).max(50).default(10),
   speed: z.number().int().min(0).max(300).default(30),
 });
 export type CharacterHp = z.infer<typeof CharacterHpSchema>;
+
+/**
+ * Binary conditions from the D&D 5.5e (2024) rules.
+ * Exhaustion is tracked separately as levels 0–6.
+ */
+export const DND55E_CONDITIONS = [
+  { key: 'blinded', label: 'Ослеплён' },
+  { key: 'charmed', label: 'Очарован' },
+  { key: 'deafened', label: 'Оглох' },
+  { key: 'frightened', label: 'Испуган' },
+  { key: 'grappled', label: 'Схвачен' },
+  { key: 'incapacitated', label: 'Недееспособен' },
+  { key: 'paralyzed', label: 'Парализован' },
+  { key: 'petrified', label: 'Окаменел' },
+  { key: 'poisoned', label: 'Отравлен' },
+  { key: 'prone', label: 'Ничком' },
+  { key: 'restrained', label: 'Опутан' },
+  { key: 'stunned', label: 'Ошеломлён' },
+  { key: 'unconscious', label: 'Без сознания' },
+] as const;
 
 export const DieTypeSchema = z.enum(['none', 'd4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100']);
 export type DieType = z.infer<typeof DieTypeSchema>;
@@ -222,6 +255,18 @@ export const InventoryItemSchema = z.object({
 });
 export type InventoryItem = z.infer<typeof InventoryItemSchema>;
 
+export const WeaponAttackSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().max(80).default(''),
+  proficient: z.boolean().default(false),
+  ability: AbilityKeySchema.default('str'),
+  damage: z.string().max(40).default(''),
+  /** Magic weapon bonus from the 2024 rules: +1, +2, or +3 to attack and damage. */
+  magicBonus: z.number().int().min(0).max(3).default(0),
+  description: z.string().max(400).default(''),
+});
+export type WeaponAttack = z.infer<typeof WeaponAttackSchema>;
+
 export const SpellSlotLevelSchema = z.object({
   current: z.number().int().min(0),
   max: z.number().int().min(0),
@@ -230,6 +275,8 @@ export type SpellSlotLevel = z.infer<typeof SpellSlotLevelSchema>;
 
 export const CharacterSpellsSchema = z.object({
   spellcastingAbility: AbilityKeySchema.nullable().default(null),
+  /** How many spell-slot rows (1…9) are shown. Rows are always 1 through this level. */
+  visibleSlotLevels: z.number().int().min(1).max(9).default(1),
   slots: z.record(z.string(), SpellSlotLevelSchema).default({}),
   pactSlots: z
     .object({
@@ -257,6 +304,7 @@ export const CharacterSchema = z.object({
   exhaustion: z.number().int().min(0).max(6).default(0),
   custom_resources: z.array(CustomResourceSchema).default([]),
   inventory: z.array(InventoryItemSchema).default([]),
+  weapon_attacks: z.array(WeaponAttackSchema).default([]),
   spells: CharacterSpellsSchema,
   notes: z.string().default(''),
   updated_at: z.union([z.number().int(), z.string(), z.date()]).optional(),
@@ -286,6 +334,7 @@ export const UpdateCharacterPatchSchema = z.object({
   exhaustion: z.number().int().min(0).max(6).optional(),
   custom_resources: z.array(CustomResourceSchema).optional(),
   inventory: z.array(InventoryItemSchema).optional(),
+  weapon_attacks: z.array(WeaponAttackSchema).optional(),
   spells: CharacterSpellsSchema.optional(),
   notes: z.string().optional(),
 });

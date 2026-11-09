@@ -1,17 +1,43 @@
 import { create } from 'zustand';
-import type {
-  AbilityKey,
-  Character,
-  CharacterHp,
-  CharacterStats,
-  ProficiencyRank,
-  SkillKey,
-  UpdateCharacterPatch,
+import {
+  type AbilityKey,
+  type Character,
+  type CharacterHp,
+  type CharacterStats,
+  type ProficiencyRank,
+  type SkillKey,
+  type UpdateCharacterPatch,
+  type WeaponAttack,
 } from '@shared/types';
-import { MAX_EXHAUSTION_LEVEL } from '@shared/rulesEngine';
+import { hitDiceAfterLongRest, MAX_EXHAUSTION_LEVEL } from '@shared/rulesEngine';
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingPatches = new Map<string, UpdateCharacterPatch>();
+
+function clampSkillBonus(value: number): number {
+  return Math.max(-150, Math.min(150, Math.trunc(value)));
+}
+
+const WEAPON_ABILITIES = ['str', 'dex', 'con', 'int', 'wis', 'cha'] as const;
+
+function normalizeWeaponAttacks(raw: WeaponAttack[] | undefined): WeaponAttack[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 12).map((attack, index) => {
+    const ability = WEAPON_ABILITIES.includes(attack?.ability) ? attack.ability : 'str';
+    return {
+      id: typeof attack?.id === 'string' && attack.id.trim() !== '' ? attack.id : `weapon-${index}`,
+      name: typeof attack?.name === 'string' ? attack.name.slice(0, 80) : '',
+      proficient: attack?.proficient === true,
+      ability,
+      damage: typeof attack?.damage === 'string' ? attack.damage.slice(0, 40) : '',
+      magicBonus:
+        attack?.magicBonus === 1 || attack?.magicBonus === 2 || attack?.magicBonus === 3
+          ? attack.magicBonus
+          : 0,
+      description: typeof attack?.description === 'string' ? attack.description.slice(0, 400) : '',
+    };
+  });
+}
 
 function normalizeCharacter(raw: Character): Character {
   return {
@@ -28,6 +54,9 @@ function normalizeCharacter(raw: Character): Character {
     proficiencies: {
       savingThrows: raw.proficiencies?.savingThrows ?? [],
       skills: raw.proficiencies?.skills ?? {},
+      skillBonuses: raw.proficiencies?.skillBonuses ?? {},
+      globalSkillBonus: raw.proficiencies?.globalSkillBonus ?? 0,
+      saveBonuses: raw.proficiencies?.saveBonuses ?? {},
       weapons: raw.proficiencies?.weapons ?? [],
       weaponMasteries: raw.proficiencies?.weaponMasteries ?? [],
       armor: raw.proficiencies?.armor ?? [],
@@ -41,16 +70,24 @@ function normalizeCharacter(raw: Character): Character {
       hit_dice_current: raw.hp?.hit_dice_current ?? 1,
       hit_dice_max: raw.hp?.hit_dice_max ?? 1,
       hit_die_type: raw.hp?.hit_die_type ?? 'd8',
+      death_save_successes: raw.hp?.death_save_successes ?? 0,
+      death_save_failures: raw.hp?.death_save_failures ?? 0,
+      conditions: raw.hp?.conditions ?? [],
       armor_class: raw.hp?.armor_class ?? 10,
       speed: raw.hp?.speed ?? 30,
     },
     spells: {
       spellcastingAbility: raw.spells?.spellcastingAbility ?? null,
+      visibleSlotLevels: Math.max(
+        1,
+        Math.min(9, Math.floor(raw.spells?.visibleSlotLevels ?? 1))
+      ),
       slots: raw.spells?.slots ?? {},
       pactSlots: raw.spells?.pactSlots,
       preparedSlugs: raw.spells?.preparedSlugs ?? [],
       knownSlugs: raw.spells?.knownSlugs ?? [],
     },
+    weapon_attacks: normalizeWeaponAttacks(raw.weapon_attacks),
   };
 }
 
@@ -73,10 +110,15 @@ interface CharacterStoreState {
   setStat: (stat: AbilityKey, value: number) => void;
   toggleSavingThrowProficiency: (ability: AbilityKey) => void;
   cycleSkillProficiency: (skill: SkillKey) => void;
+  setSkillBonus: (skill: SkillKey, bonus: number) => void;
+  setSaveBonus: (ability: AbilityKey, bonus: number) => void;
+  addBonusToAllSkills: (amount: number) => void;
   updateHpAndCombat: (patch: Partial<CharacterHp>) => void;
   setSpellcastingAbility: (ability: AbilityKey | null) => void;
   updateSpellSlot: (slotLevel: number, patch: { current?: number; max?: number }) => void;
+  setVisibleSpellSlotLevels: (count: number) => void;
   resetAllSpellSlots: () => void;
+  setWeaponAttacks: (attacks: WeaponAttack[]) => void;
   takeShortRest: () => void;
   takeLongRest: () => void;
   updateNotes: (notes: string) => void;
@@ -253,10 +295,23 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
 
     setLevel: (level) => {
       const clamped = Math.max(1, Math.min(20, Math.floor(level) || 1));
-      applyActiveUpdate((current) => ({
-        updated: { ...current, level: clamped },
-        patch: { level: clamped },
-      }));
+      applyActiveUpdate((current) => {
+        const delta = clamped - current.level;
+        const previousDice = current.hp.hit_dice_current ?? current.level;
+        const nextHitDice =
+          delta >= 0
+            ? Math.min(clamped, previousDice + delta)
+            : Math.min(previousDice, clamped);
+        const nextHp: CharacterHp = {
+          ...current.hp,
+          hit_dice_current: nextHitDice,
+          hit_dice_max: clamped,
+        };
+        return {
+          updated: { ...current, level: clamped, hp: nextHp },
+          patch: { level: clamped, hp: nextHp },
+        };
+      });
     },
 
     setExhaustion: (exhaustion) => {
@@ -323,6 +378,65 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       });
     },
 
+    setSkillBonus: (skill, bonus) => {
+      applyActiveUpdate((current) => {
+        const nextBonuses = { ...(current.proficiencies.skillBonuses ?? {}) };
+        const clamped = clampSkillBonus(bonus);
+        if (clamped === 0) {
+          delete nextBonuses[skill];
+        } else {
+          nextBonuses[skill] = clamped;
+        }
+        const nextProficiencies = {
+          ...current.proficiencies,
+          skillBonuses: nextBonuses,
+        };
+        return {
+          updated: { ...current, proficiencies: nextProficiencies },
+          patch: { proficiencies: nextProficiencies },
+        };
+      });
+    },
+
+    setSaveBonus: (ability, bonus) => {
+      applyActiveUpdate((current) => {
+        const nextBonuses = { ...(current.proficiencies.saveBonuses ?? {}) };
+        const clamped = clampSkillBonus(bonus);
+        if (clamped === 0) {
+          delete nextBonuses[ability];
+        } else {
+          nextBonuses[ability] = clamped;
+        }
+        const nextProficiencies = {
+          ...current.proficiencies,
+          saveBonuses: nextBonuses,
+        };
+        return {
+          updated: { ...current, proficiencies: nextProficiencies },
+          patch: { proficiencies: nextProficiencies },
+        };
+      });
+    },
+
+    addBonusToAllSkills: (amount) => {
+      const delta = Math.trunc(amount);
+      if (!Number.isFinite(delta) || delta === 0) return;
+
+      applyActiveUpdate((current) => {
+        const nextGlobal = clampSkillBonus(
+          (current.proficiencies.globalSkillBonus ?? 0) + delta
+        );
+        const nextProficiencies = {
+          ...current.proficiencies,
+          globalSkillBonus: nextGlobal,
+        };
+        return {
+          updated: { ...current, proficiencies: nextProficiencies },
+          patch: { proficiencies: nextProficiencies },
+        };
+      });
+    },
+
     updateHpAndCombat: (patch) => {
       applyActiveUpdate((current) => {
         const nextCurrent =
@@ -340,6 +454,31 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
             ? Math.max(0, Math.min(300, Math.floor(patch.speed)))
             : current.hp.speed;
 
+        const hitDiceMax = Math.max(1, current.level);
+        const nextHitDiceCurrent =
+          patch.hit_dice_current !== undefined
+            ? Math.max(0, Math.min(hitDiceMax, Math.floor(patch.hit_dice_current)))
+            : Math.max(0, Math.min(hitDiceMax, current.hp.hit_dice_current ?? hitDiceMax));
+        const allowedDice = ['d6', 'd8', 'd10', 'd12'] as const;
+        const requestedDie = patch.hit_die_type;
+        const nextHitDie = allowedDice.includes(
+          requestedDie as (typeof allowedDice)[number]
+        )
+          ? (requestedDie as (typeof allowedDice)[number])
+          : (current.hp.hit_die_type ?? 'd8');
+        const clampDeathSave = (value: number | undefined, fallback: number): number => {
+          const source = value !== undefined ? value : fallback;
+          return Math.max(0, Math.min(3, Math.floor(source) || 0));
+        };
+        const nextDeathSuccesses = clampDeathSave(
+          patch.death_save_successes,
+          current.hp.death_save_successes ?? 0
+        );
+        const nextDeathFailures = clampDeathSave(
+          patch.death_save_failures,
+          current.hp.death_save_failures ?? 0
+        );
+
         const nextHp: CharacterHp = {
           ...current.hp,
           ...patch,
@@ -348,6 +487,11 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
           temp: nextTemp,
           armor_class: nextAc,
           speed: nextSpeed,
+          hit_dice_current: nextHitDiceCurrent,
+          hit_dice_max: hitDiceMax,
+          hit_die_type: nextHitDie,
+          death_save_successes: nextDeathSuccesses,
+          death_save_failures: nextDeathFailures,
         };
         return {
           updated: { ...current, hp: nextHp },
@@ -361,6 +505,20 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
         const nextSpells = {
           ...current.spells,
           spellcastingAbility: ability,
+        };
+        return {
+          updated: { ...current, spells: nextSpells },
+          patch: { spells: nextSpells },
+        };
+      });
+    },
+
+    setVisibleSpellSlotLevels: (count) => {
+      const nextCount = Math.max(1, Math.min(9, Math.floor(count)));
+      applyActiveUpdate((current) => {
+        const nextSpells = {
+          ...current.spells,
+          visibleSlotLevels: nextCount,
         };
         return {
           updated: { ...current, spells: nextSpells },
@@ -401,6 +559,16 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       });
     },
 
+    setWeaponAttacks: (attacks) => {
+      applyActiveUpdate((current) => {
+        const nextAttacks = normalizeWeaponAttacks(attacks);
+        return {
+          updated: { ...current, weapon_attacks: nextAttacks },
+          patch: { weapon_attacks: nextAttacks },
+        };
+      });
+    },
+
     resetAllSpellSlots: () => {
       applyActiveUpdate((current) => {
         const nextSlots: Record<string, { current: number; max: number }> = {};
@@ -426,6 +594,7 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
     /**
      * D&D 5.5e (2024) Short Rest:
      * - Restores pact magic slots (if any) and custom resources with `reset_on === 'short_rest'`.
+     * - Clears death saving throws and active conditions.
      */
     takeShortRest: () => {
       applyActiveUpdate((current) => {
@@ -443,13 +612,22 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
             }
           : current.spells;
 
+        const nextHp: CharacterHp = {
+          ...current.hp,
+          death_save_successes: 0,
+          death_save_failures: 0,
+          conditions: [],
+        };
+
         return {
           updated: {
             ...current,
+            hp: nextHp,
             custom_resources: nextCustomResources,
             spells: nextSpells,
           },
           patch: {
+            hp: nextHp,
             custom_resources: nextCustomResources,
             spells: nextSpells,
           },
@@ -460,7 +638,8 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
     /**
      * D&D 5.5e (2024) Long Rest:
      * - Restores all HP (`current = max`) and clears Temporary HP (`temp = 0`).
-     * - Restores all Hit Dice (`hit_dice_current = level`, `hit_dice_max = level`).
+     * - Restores half of the hit dice pool (rounded up). A second long rest restores the rest.
+     * - Clears death saving throws.
      * - Reduces Exhaustion by 1 level (`Math.max(0, exhaustion - 1)`).
      * - Restores all expended Spell Slots (1–9 circles) and Pact Slots (`current = 0` spent).
      * - Restores all custom resources (`short_rest`, `long_rest`, `dawn`).
@@ -471,8 +650,14 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
           ...current.hp,
           current: current.hp.max,
           temp: 0,
-          hit_dice_current: current.level,
           hit_dice_max: current.level,
+          hit_dice_current: hitDiceAfterLongRest(
+            current.hp.hit_dice_current ?? 0,
+            current.level
+          ),
+          death_save_successes: 0,
+          death_save_failures: 0,
+          conditions: [],
         };
 
         const nextExhaustion = Math.max(0, (current.exhaustion ?? 0) - 1);

@@ -44,6 +44,9 @@ function buildDefaultCharacterRow(
     proficiencies: overrides.proficiencies ?? {
       savingThrows: [],
       skills: {},
+      skillBonuses: {},
+      globalSkillBonus: 0,
+      saveBonuses: {},
       weapons: [],
       weaponMasteries: [],
       armor: [],
@@ -57,14 +60,19 @@ function buildDefaultCharacterRow(
       hit_dice_current: 1,
       hit_dice_max: 1,
       hit_die_type: 'd8',
+      death_save_successes: 0,
+      death_save_failures: 0,
+      conditions: [],
       armor_class: 10,
       speed: 30,
     },
     exhaustion: overrides.exhaustion ?? 0,
     custom_resources: overrides.custom_resources ?? [],
     inventory: overrides.inventory ?? [],
+    weapon_attacks: overrides.weapon_attacks ?? [],
     spells: overrides.spells ?? {
       spellcastingAbility: null,
+      visibleSlotLevels: 1,
       slots: {},
       preparedSlugs: [],
       knownSlugs: [],
@@ -221,6 +229,7 @@ app.patch('/api/characters/:id', async (c) => {
   if (patch.custom_resources !== undefined)
     updateData.custom_resources = patch.custom_resources;
   if (patch.inventory !== undefined) updateData.inventory = patch.inventory;
+  if (patch.weapon_attacks !== undefined) updateData.weapon_attacks = patch.weapon_attacks;
   if (patch.spells !== undefined) updateData.spells = patch.spells;
   if (patch.notes !== undefined) updateData.notes = patch.notes;
 

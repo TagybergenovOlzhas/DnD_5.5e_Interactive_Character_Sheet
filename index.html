@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>D&amp;D 5.5e (2024) — Журнал Персонажа</title>
+    <script>
+      try {
+        if (localStorage.getItem('dnd-sheet-night') === '1') {
+          document.documentElement.classList.add('night');
+        }
+      } catch (e) {}
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -11,7 +18,7 @@
       rel="stylesheet"
     />
   </head>
-  <body class="bg-[#F8F5EE] text-[#1C222D] font-sans antialiased selection:bg-[#D4A359]/25 selection:text-[#1C222D]">
+  <body class="bg-[var(--paper)] text-[var(--ink)] font-sans antialiased selection:bg-[color-mix(in_srgb,var(--ochre)_25%,transparent)] selection:text-[var(--ink)]">
     <div id="root"></div>
     <script type="module" src="/src/client/main.tsx"></script>
   </body>

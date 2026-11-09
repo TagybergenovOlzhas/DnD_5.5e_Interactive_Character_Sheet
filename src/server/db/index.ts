@@ -57,8 +57,16 @@ export function ensureDatabaseInitialized(): void {
       custom_resources TEXT NOT NULL DEFAULT '[]',
       inventory TEXT NOT NULL DEFAULT '[]',
       spells TEXT NOT NULL,
+      weapon_attacks TEXT NOT NULL DEFAULT '[]',
       notes TEXT NOT NULL DEFAULT '',
       updated_at INTEGER NOT NULL
     );
   `);
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as { name: string }[];
+  if (!columns.some((column) => column.name === 'weapon_attacks')) {
+    sqlite.exec(
+      "ALTER TABLE characters ADD COLUMN weapon_attacks TEXT NOT NULL DEFAULT '[]'"
+    );
+  }
 }

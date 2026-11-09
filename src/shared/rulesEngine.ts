@@ -149,6 +149,34 @@ export function calculateSpellAttackBonus(params: {
 }
 
 /**
+ * Weapon attack bonus under D&D 5.5e (2024).
+ * Ability modifier, proficiency when trained, exhaustion on the d20 roll,
+ * and a magic weapon bonus of +1, +2, or +3.
+ */
+export function calculateWeaponAttackBonus(params: {
+  abilityScore: number;
+  level: number;
+  proficient: boolean;
+  exhaustionLevel?: number;
+  magicBonus?: number;
+}): number {
+  const magicBonus = Math.max(0, Math.min(3, Math.floor(params.magicBonus ?? 0)));
+  return calculateD20TestModifier({
+    abilityScore: params.abilityScore,
+    level: params.level,
+    proficiencyRank: params.proficient ? 1 : 0,
+    exhaustionLevel: params.exhaustionLevel ?? 0,
+    flatBonus: magicBonus,
+  });
+}
+
+/** Ability modifier plus the magic weapon bonus, added to the weapon's damage dice. */
+export function calculateWeaponDamageBonus(abilityScore: number, magicBonus = 0): number {
+  const magic = Math.max(0, Math.min(3, Math.floor(magicBonus)));
+  return calculateAbilityModifier(abilityScore) + magic;
+}
+
+/**
  * Calculates Passive Wisdom (Perception) / Пассивная Мудрость (Восприятие) under D&D 5.5e (2024) rules.
  * Formula: 10 + Perception Modifier (including proficiency/expertise and 2024 exhaustion penalty).
  */
@@ -177,6 +205,104 @@ export function calculateEffectiveSpeed(baseSpeedFeet: number, exhaustionLevel: 
   const { speedPenaltyFeet, isDead } = calculateExhaustionPenalty(exhaustionLevel);
   if (isDead) return 0;
   return Math.max(0, baseSpeedFeet - speedPenaltyFeet);
+}
+
+/**
+ * Initiative modifier for D&D 5.5e (2024).
+ * Initiative is a Dexterity check: Dexterity modifier, plus the exhaustion
+ * penalty of −2 per level. Proficiency is not added unless a feature says so.
+ */
+export function calculateInitiativeModifier(params: {
+  dexterityScore: number;
+  exhaustionLevel?: number;
+  flatBonus?: number;
+}): number {
+  return calculateD20TestModifier({
+    abilityScore: params.dexterityScore,
+    level: 1,
+    proficiencyRank: 0,
+    exhaustionLevel: params.exhaustionLevel ?? 0,
+    flatBonus: params.flatBonus ?? 0,
+  });
+}
+
+/**
+ * Hit dice regained at the end of one long rest.
+ * Half the pool, rounded up, so a second long rest restores whatever is left.
+ * Level 1 regains its single die on the first rest.
+ */
+export function hitDiceRegainedOnLongRest(hitDiceMax: number): number {
+  const max = Math.max(1, Math.floor(hitDiceMax));
+  return Math.max(1, Math.ceil(max / 2));
+}
+
+/** Remaining hit dice after one long rest, never above the pool size. */
+export function hitDiceAfterLongRest(current: number, hitDiceMax: number): number {
+  const max = Math.max(1, Math.floor(hitDiceMax));
+  const safeCurrent = Math.max(0, Math.min(max, Math.floor(current)));
+  return Math.min(max, safeCurrent + hitDiceRegainedOnLongRest(max));
+}
+
+/**
+ * Mechanical effects of active D&D 5.5e (2024) conditions on the character's own sheet.
+ * Each list holds the condition keys responsible, so the UI can explain why a value changed.
+ */
+export interface ConditionEffects {
+  /** Disadvantage on the character's attack rolls (weapons and spell attacks). */
+  attackDisadvantage: string[];
+  /** Disadvantage on ability checks, which includes skills and initiative. */
+  abilityCheckDisadvantage: string[];
+  /** Disadvantage on Initiative specifically (Incapacitated). */
+  initiativeDisadvantage: string[];
+  /** Disadvantage on saving throws of a given ability. */
+  saveDisadvantage: Partial<Record<AbilityKey, string[]>>;
+  /** Automatic failure on saving throws of a given ability. */
+  saveAutoFail: Partial<Record<AbilityKey, string[]>>;
+  /** Conditions that set Speed to 0. */
+  speedZero: string[];
+  /** Conditions that make movement cost double (crawling while Prone). */
+  speedHalved: string[];
+  /** Conditions that prevent actions, bonus actions, and reactions. */
+  incapacitated: string[];
+  /** Attack rolls against the character have Advantage. */
+  attackedWithAdvantage: string[];
+  /** Prone: Advantage for attackers within 5 feet, Disadvantage beyond that. */
+  attackedNearbyAdvantage: string[];
+  /** Resistance to all damage (Petrified). */
+  resistAllDamage: string[];
+}
+
+const INCAPACITATING_CONDITIONS = ['incapacitated', 'paralyzed', 'petrified', 'stunned', 'unconscious'];
+const STR_DEX_AUTO_FAIL_CONDITIONS = ['paralyzed', 'petrified', 'stunned', 'unconscious'];
+
+export function calculateConditionEffects(conditions: readonly string[]): ConditionEffects {
+  const active = new Set(conditions);
+  const pick = (keys: readonly string[]): string[] => keys.filter((key) => active.has(key));
+
+  const strDexAutoFail = pick(STR_DEX_AUTO_FAIL_CONDITIONS);
+  const dexDisadvantage = pick(['restrained']);
+
+  return {
+    attackDisadvantage: pick(['blinded', 'frightened', 'poisoned', 'prone', 'restrained', 'grappled']),
+    abilityCheckDisadvantage: pick(['frightened', 'poisoned']),
+    initiativeDisadvantage: pick(INCAPACITATING_CONDITIONS),
+    saveDisadvantage: dexDisadvantage.length > 0 ? { dex: dexDisadvantage } : {},
+    saveAutoFail:
+      strDexAutoFail.length > 0 ? { str: strDexAutoFail, dex: strDexAutoFail } : {},
+    speedZero: pick(['grappled', 'restrained', 'paralyzed', 'petrified', 'unconscious']),
+    speedHalved: pick(['prone']),
+    incapacitated: pick(INCAPACITATING_CONDITIONS),
+    attackedWithAdvantage: pick(['blinded', 'restrained', 'paralyzed', 'petrified', 'stunned', 'unconscious']),
+    attackedNearbyAdvantage: pick(['prone']),
+    resistAllDamage: pick(['petrified']),
+  };
+}
+
+/** Speed after exhaustion and conditions: 0 when held in place, half while crawling Prone. */
+export function applyConditionSpeed(speedFeet: number, effects: ConditionEffects): number {
+  if (effects.speedZero.length > 0) return 0;
+  if (effects.speedHalved.length > 0) return Math.floor(speedFeet / 2);
+  return speedFeet;
 }
 
 /**
