@@ -1,0 +1,48 @@
+{
+  "name": "dnd-55e-compendium-sheet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"cyan,magenta\" \"node --watch --import tsx src/server/index.ts\" \"vite\"",
+    "dev:server": "node --watch --import tsx src/server/index.ts",
+    "dev:client": "vite",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/server/index.js",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@hono/node-ws": "^1.0.0",
+    "@hono/zod-validator": "^0.4.2",
+    "better-sqlite3": "^13.0.3",
+    "cheerio": "^1.0.0",
+    "drizzle-orm": "^0.38.3",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.6.16",
+    "lucide-react": "^0.469.0",
+    "marked": "^15.0.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "drizzle-kit": "^0.30.1",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  }
+}

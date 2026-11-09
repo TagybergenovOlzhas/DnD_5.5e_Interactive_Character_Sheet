@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+
+  body,
+  input,
+  button,
+  select,
+  textarea {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: 'lnum' 1, 'tnum' 1;
+  }
+
+  body {
+    background-color: #F8F5EE;
+    color: #1C222D;
+    min-height: 100vh;
+  }
+
+  /* Hide ugly number input spin buttons for clean editorial aesthetics */
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
