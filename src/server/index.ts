@@ -12,12 +12,34 @@ import { characters, compendiumEntries, type NewCharacterRow } from './db/schema
 import { wsHub } from './wsHub.js';
 import { deduplicateCompendiumEntries } from '../shared/rulesEngine.js';
 import {
+  getVaultFileContent,
+  getVaultFileTree,
+  syncObsidianSpells,
+} from './compendium/obsidianParser.js';
+import {
   CreateCharacterInputSchema,
   UpdateCharacterPatchSchema,
 } from '../shared/types.js';
 
 // Initialize SQLite tables on startup
 ensureDatabaseInitialized();
+
+// Automatically ingest and sync Obsidian compendium spells on startup
+try {
+  const initialSync = syncObsidianSpells();
+  // If the vault was already present on disk, also trigger a non-blocking Git pull on startup
+  if (!initialSync.git) {
+    setTimeout(() => {
+      try {
+        syncObsidianSpells({ pullGit: true });
+      } catch (err) {
+        console.warn('[Compendium] Background Git sync skipped:', err);
+      }
+    }, 1000);
+  }
+} catch (err) {
+  console.error('[Compendium] Failed to auto-sync Obsidian compendium:', err);
+}
 
 /**
  * Helper to create a default character row with all stats set to 10.
@@ -26,7 +48,7 @@ function buildDefaultCharacterRow(
   overrides: Partial<NewCharacterRow> = {}
 ): NewCharacterRow {
   return {
-    id: randomUUID(),
+    id: overrides.id ?? randomUUID(),
     name: overrides.name ?? 'Новый персонаж',
     player_name: overrides.player_name ?? 'Игрок',
     level: overrides.level ?? 1,
@@ -82,21 +104,6 @@ function buildDefaultCharacterRow(
   };
 }
 
-// Seed a default character if the database is completely empty
-const existingCount = db.select().from(characters).all().length;
-if (existingCount === 0) {
-  db.insert(characters)
-    .values(
-      buildDefaultCharacterRow({
-        name: 'Каэлин',
-        species: 'Человек',
-        class_name: 'Воин',
-        subclass_name: 'Мастер боевых искусств',
-      })
-    )
-    .run();
-}
-
 const app = new Hono();
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
@@ -120,12 +127,94 @@ app.get('/api/health', (c) => {
 });
 
 // ============================================================================
-// Compendium Endpoint
+// Compendium Endpoints
 // ============================================================================
 app.get('/api/compendium', async (c) => {
+  const category = c.req.query('category');
+  const levelStr = c.req.query('level');
+  const search = c.req.query('search')?.toLowerCase().trim();
+  const classTag = c.req.query('class')?.toLowerCase().trim();
+
   const allEntries = await db.select().from(compendiumEntries);
-  const resolved = deduplicateCompendiumEntries(allEntries);
+  let resolved = deduplicateCompendiumEntries(allEntries);
+
+  if (category) {
+    resolved = resolved.filter((e) => e.category === category);
+  }
+  if (levelStr !== undefined && levelStr !== '') {
+    const lvl = parseInt(levelStr, 10);
+    resolved = resolved.filter((e) => {
+      const meta = e.metadata as { spellLevel?: number } | undefined;
+      return meta?.spellLevel === lvl;
+    });
+  }
+  if (classTag) {
+    resolved = resolved.filter((e) => {
+      const meta = e.metadata as
+        | { classes?: string[]; tags?: string[] }
+        | undefined;
+      const classes = meta?.classes ?? [];
+      const tags = meta?.tags ?? [];
+      return (
+        classes.some((cls) => cls.toLowerCase() === classTag) ||
+        tags.some((t) => t.toLowerCase() === classTag)
+      );
+    });
+  }
+  if (search) {
+    resolved = resolved.filter((e) => {
+      return (
+        e.title.toLowerCase().includes(search) ||
+        e.slug.toLowerCase().includes(search) ||
+        (e.raw_content && e.raw_content.toLowerCase().includes(search))
+      );
+    });
+  }
+
   return c.json({ items: resolved, total: resolved.length });
+});
+
+app.post('/api/compendium/sync', (c) => {
+  try {
+    const stats = syncObsidianSpells({ pullGit: true });
+    return c.json({ ok: true, stats });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) }, 500);
+  }
+});
+
+// ============================================================================
+// Obsidian Vault Library Endpoints
+// ============================================================================
+app.get('/api/vault/tree', (c) => {
+  try {
+    const result = getVaultFileTree();
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: String(err), tree: [], totalFiles: 0 }, 500);
+  }
+});
+
+app.get('/api/vault/file', (c) => {
+  const filePath = c.req.query('path');
+  if (!filePath) {
+    return c.json({ error: 'Missing path parameter' }, 400);
+  }
+  const file = getVaultFileContent(filePath);
+  if (!file) {
+    return c.json({ error: 'File not found' }, 404);
+  }
+  return c.json(file);
+});
+
+app.post('/api/vault/sync', (c) => {
+  try {
+    const stats = syncObsidianSpells({ pullGit: true });
+    const vault = getVaultFileTree();
+    return c.json({ ok: true, stats, vault });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) }, 500);
+  }
 });
 
 // ============================================================================
@@ -173,8 +262,8 @@ app.post('/api/characters', async (c) => {
     subclass_name: input.subclass_name,
   });
 
-  await db.insert(characters).values(newRow);
-  const created = await db
+  db.insert(characters).values(newRow).run();
+  const created = db
     .select()
     .from(characters)
     .where(eq(characters.id, newId))

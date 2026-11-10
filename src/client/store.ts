@@ -4,15 +4,41 @@ import {
   type Character,
   type CharacterHp,
   type CharacterStats,
+  type CompendiumEntry,
+  type CustomResource,
+  type InventoryItem,
   type ProficiencyRank,
   type SkillKey,
   type UpdateCharacterPatch,
+  type VaultFileNode,
   type WeaponAttack,
 } from '@shared/types';
 import { hitDiceAfterLongRest, MAX_EXHAUSTION_LEVEL } from '@shared/rulesEngine';
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingPatches = new Map<string, UpdateCharacterPatch>();
+
+const ACTIVE_CHARACTER_STORAGE_KEY = 'dnd-sheet-active-character-id';
+
+function getStoredCharacterId(): string | null {
+  try {
+    return window.localStorage.getItem(ACTIVE_CHARACTER_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredCharacterId(id: string | null): void {
+  try {
+    if (id) {
+      window.localStorage.setItem(ACTIVE_CHARACTER_STORAGE_KEY, id);
+    } else {
+      window.localStorage.removeItem(ACTIVE_CHARACTER_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 function clampSkillBonus(value: number): number {
   return Math.max(-150, Math.min(150, Math.trunc(value)));
@@ -87,6 +113,35 @@ function normalizeCharacter(raw: Character): Character {
       preparedSlugs: raw.spells?.preparedSlugs ?? [],
       knownSlugs: raw.spells?.knownSlugs ?? [],
     },
+    custom_resources: Array.isArray(raw.custom_resources)
+      ? raw.custom_resources.map((res, index) => ({
+          id: typeof res?.id === 'string' && res.id.trim() !== '' ? res.id : `res-${index}`,
+          name: typeof res?.name === 'string' ? res.name : '',
+          current: typeof res?.current === 'number' ? Math.max(0, res.current) : 1,
+          max: typeof res?.max === 'number' ? Math.max(1, res.max) : 1,
+          reset_on:
+            res?.reset_on === 'short_rest' ||
+            res?.reset_on === 'long_rest' ||
+            res?.reset_on === 'dawn' ||
+            res?.reset_on === 'manual'
+              ? res.reset_on
+              : 'long_rest',
+          description: typeof res?.description === 'string' ? res.description : '',
+        }))
+      : [],
+    inventory: Array.isArray(raw.inventory)
+      ? raw.inventory.map((item, index) => ({
+          id: typeof item?.id === 'string' && item.id.trim() !== '' ? item.id : `item-${index}`,
+          compendium_slug: item?.compendium_slug,
+          name: typeof item?.name === 'string' ? item.name : '',
+          description: typeof item?.description === 'string' ? item.description : '',
+          quantity: typeof item?.quantity === 'number' ? Math.max(0, item.quantity) : 1,
+          equipped: Boolean(item?.equipped),
+          attuned: Boolean(item?.attuned),
+          weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
+          overrides: item?.overrides,
+        }))
+      : [],
     weapon_attacks: normalizeWeaponAttacks(raw.weapon_attacks),
   };
 }
@@ -98,7 +153,7 @@ interface CharacterStoreState {
   isSaving: boolean;
 
   fetchCharacters: () => Promise<void>;
-  selectCharacter: (id: string) => void;
+  selectCharacter: (id: string | null) => void;
   createCharacter: () => Promise<void>;
   deleteCharacter: (id: string) => Promise<void>;
 
@@ -119,9 +174,28 @@ interface CharacterStoreState {
   setVisibleSpellSlotLevels: (count: number) => void;
   resetAllSpellSlots: () => void;
   setWeaponAttacks: (attacks: WeaponAttack[]) => void;
+  addCustomResource: (resource?: Partial<CustomResource>) => void;
+  updateCustomResource: (id: string, patch: Partial<CustomResource>) => void;
+  deleteCustomResource: (id: string) => void;
+  addInventoryItem: (item?: Partial<InventoryItem>) => void;
+  updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => void;
+  deleteInventoryItem: (id: string) => void;
+  addSpellToCharacter: (slug: string) => void;
+  removeSpellFromCharacter: (slug: string) => void;
+  togglePreparedSpell: (slug: string) => void;
+  compendiumSpells: CompendiumEntry[];
+  isCompendiumLoading: boolean;
+  fetchCompendiumSpells: () => Promise<void>;
+  vaultTree: VaultFileNode[];
+  vaultTotalFiles: number;
+  isVaultLoading: boolean;
+  isVaultSyncing: boolean;
+  fetchVaultTree: () => Promise<void>;
+  syncVaultWithGit: () => Promise<void>;
   takeShortRest: () => void;
   takeLongRest: () => void;
   updateNotes: (notes: string) => void;
+  saveActiveCharacter: () => Promise<void>;
 }
 
 export const useCharacterStore = create<CharacterStoreState>((set, get) => {
@@ -186,9 +260,15 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
 
   return {
     characters: [],
-    activeCharacterId: null,
+    activeCharacterId: getStoredCharacterId(),
     isLoading: true,
     isSaving: false,
+    compendiumSpells: [],
+    isCompendiumLoading: false,
+    vaultTree: [],
+    vaultTotalFiles: 0,
+    isVaultLoading: false,
+    isVaultSyncing: false,
 
     fetchCharacters: async () => {
       set({ isLoading: true });
@@ -197,37 +277,88 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
         const data = (await res.json()) as { items?: Character[] };
         const list = (data.items ?? []).map(normalizeCharacter);
 
-        if (list.length === 0) {
-          const createRes = await fetch('/api/characters', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
-          const createdData = (await createRes.json()) as { item: Character };
-          const normalized = normalizeCharacter(createdData.item);
-          set({
-            characters: [normalized],
-            activeCharacterId: normalized.id,
-            isLoading: false,
-          });
-          return;
+        const storedId = get().activeCharacterId ?? getStoredCharacterId();
+        const validStoredId =
+          storedId && list.some((c) => c.id === storedId) ? storedId : null;
+
+        if (!validStoredId) {
+          setStoredCharacterId(null);
         }
 
-        set((state) => ({
+        set({
           characters: list,
-          activeCharacterId:
-            state.activeCharacterId && list.some((c) => c.id === state.activeCharacterId)
-              ? state.activeCharacterId
-              : (list[0]?.id ?? null),
+          activeCharacterId: validStoredId,
           isLoading: false,
-        }));
+        });
+
+        if (get().compendiumSpells.length === 0) {
+          void get().fetchCompendiumSpells();
+        }
+        if (get().vaultTree.length === 0) {
+          void get().fetchVaultTree();
+        }
       } catch (err) {
         console.error('Failed to fetch characters:', err);
         set({ isLoading: false });
       }
     },
 
+    fetchCompendiumSpells: async () => {
+      set({ isCompendiumLoading: true });
+      try {
+        const res = await fetch('/api/compendium?category=spell');
+        const data = (await res.json()) as { items?: CompendiumEntry[] };
+        set({ compendiumSpells: data.items ?? [], isCompendiumLoading: false });
+      } catch (err) {
+        console.error('Failed to fetch compendium spells:', err);
+        set({ isCompendiumLoading: false });
+      }
+    },
+
+    fetchVaultTree: async () => {
+      set({ isVaultLoading: true });
+      try {
+        const res = await fetch('/api/vault/tree');
+        const data = (await res.json()) as {
+          tree?: VaultFileNode[];
+          totalFiles?: number;
+        };
+        set({
+          vaultTree: data.tree ?? [],
+          vaultTotalFiles: data.totalFiles ?? 0,
+          isVaultLoading: false,
+        });
+      } catch (err) {
+        console.error('Failed to fetch vault tree:', err);
+        set({ isVaultLoading: false });
+      }
+    },
+
+    syncVaultWithGit: async () => {
+      set({ isVaultSyncing: true });
+      try {
+        const res = await fetch('/api/vault/sync', { method: 'POST' });
+        const data = (await res.json()) as {
+          vault?: { tree?: VaultFileNode[]; totalFiles?: number };
+        };
+        if (data.vault?.tree) {
+          set({
+            vaultTree: data.vault.tree,
+            vaultTotalFiles: data.vault.totalFiles ?? 0,
+          });
+        } else {
+          await get().fetchVaultTree();
+        }
+        await get().fetchCompendiumSpells();
+        set({ isVaultSyncing: false });
+      } catch (err) {
+        console.error('Failed to sync vault with git:', err);
+        set({ isVaultSyncing: false });
+      }
+    },
+
     selectCharacter: (id) => {
+      setStoredCharacterId(id);
       set({ activeCharacterId: id });
     },
 
@@ -237,14 +368,19 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            name: 'Новый персонаж',
-            species: 'Человек',
-            class_name: 'Воин',
+            name: '',
+            species: '',
+            class_name: '',
             subclass_name: null,
           }),
         });
-        const data = (await res.json()) as { item: Character };
+        const data = (await res.json()) as { item?: Character };
+        if (!data?.item) {
+          console.error('Server did not return created character:', data);
+          return;
+        }
         const created = normalizeCharacter(data.item);
+        setStoredCharacterId(created.id);
         set((state) => ({
           characters: [created, ...state.characters],
           activeCharacterId: created.id,
@@ -265,18 +401,14 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       try {
         await fetch(`/api/characters/${id}`, { method: 'DELETE' });
         const remaining = get().characters.filter((c) => c.id !== id);
-
-        if (remaining.length === 0) {
-          await get().createCharacter();
-          return;
+        const wasActive = get().activeCharacterId === id;
+        if (wasActive) {
+          setStoredCharacterId(null);
         }
 
         set((state) => ({
           characters: remaining,
-          activeCharacterId:
-            state.activeCharacterId === id
-              ? (remaining[0]?.id ?? null)
-              : state.activeCharacterId,
+          activeCharacterId: state.activeCharacterId === id ? null : state.activeCharacterId,
         }));
       } catch (err) {
         console.error('Failed to delete character:', err);
@@ -569,6 +701,169 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       });
     },
 
+    addCustomResource: (resource) => {
+      applyActiveUpdate((current) => {
+        const initialMax =
+          resource?.max !== undefined ? Math.max(1, Math.min(30, Math.floor(resource.max))) : 1;
+        const initialCurrent =
+          resource?.current !== undefined
+            ? Math.max(0, Math.min(initialMax, Math.floor(resource.current)))
+            : initialMax;
+        const nextResources: CustomResource[] = [
+          ...(current.custom_resources ?? []),
+          {
+            id: resource?.id ?? crypto.randomUUID(),
+            name: resource?.name ?? '',
+            current: initialCurrent,
+            max: initialMax,
+            reset_on: resource?.reset_on ?? 'long_rest',
+            description: resource?.description ?? '',
+          },
+        ];
+        return {
+          updated: { ...current, custom_resources: nextResources },
+          patch: { custom_resources: nextResources },
+        };
+      });
+    },
+
+    updateCustomResource: (id, patch) => {
+      applyActiveUpdate((current) => {
+        const nextResources = (current.custom_resources ?? []).map((res) => {
+          if (res.id !== id) return res;
+          const nextMax =
+            patch.max !== undefined
+              ? Math.max(1, Math.min(30, Math.floor(patch.max)))
+              : res.max;
+          let nextCurrent =
+            patch.current !== undefined
+              ? Math.max(0, Math.min(nextMax, Math.floor(patch.current)))
+              : Math.min(res.current, nextMax);
+          return {
+            ...res,
+            ...patch,
+            max: nextMax,
+            current: nextCurrent,
+          };
+        });
+        return {
+          updated: { ...current, custom_resources: nextResources },
+          patch: { custom_resources: nextResources },
+        };
+      });
+    },
+
+    deleteCustomResource: (id) => {
+      applyActiveUpdate((current) => {
+        const nextResources = (current.custom_resources ?? []).filter((res) => res.id !== id);
+        return {
+          updated: { ...current, custom_resources: nextResources },
+          patch: { custom_resources: nextResources },
+        };
+      });
+    },
+
+    addInventoryItem: (item) => {
+      applyActiveUpdate((current) => {
+        const nextInventory: InventoryItem[] = [
+          ...(current.inventory ?? []),
+          {
+            id: item?.id ?? crypto.randomUUID(),
+            name: typeof item?.name === 'string' ? item.name : '',
+            description: typeof item?.description === 'string' ? item.description : '',
+            quantity: typeof item?.quantity === 'number' ? Math.max(0, item.quantity) : 1,
+            equipped: Boolean(item?.equipped),
+            attuned: Boolean(item?.attuned),
+            weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
+          },
+        ];
+        return {
+          updated: { ...current, inventory: nextInventory },
+          patch: { inventory: nextInventory },
+        };
+      });
+    },
+
+    updateInventoryItem: (id, patch) => {
+      applyActiveUpdate((current) => {
+        const nextInventory = (current.inventory ?? []).map((item) => {
+          if (item.id !== id) return item;
+          return {
+            ...item,
+            ...patch,
+          };
+        });
+        return {
+          updated: { ...current, inventory: nextInventory },
+          patch: { inventory: nextInventory },
+        };
+      });
+    },
+
+    deleteInventoryItem: (id) => {
+      applyActiveUpdate((current) => {
+        const nextInventory = (current.inventory ?? []).filter((item) => item.id !== id);
+        return {
+          updated: { ...current, inventory: nextInventory },
+          patch: { inventory: nextInventory },
+        };
+      });
+    },
+
+    addSpellToCharacter: (slug) => {
+      applyActiveUpdate((current) => {
+        const known = current.spells?.knownSlugs ?? [];
+        if (known.includes(slug)) {
+          return {
+            updated: current,
+            patch: {},
+          };
+        }
+        const nextSpells = {
+          ...current.spells,
+          knownSlugs: [...known, slug],
+        };
+        return {
+          updated: { ...current, spells: nextSpells },
+          patch: { spells: nextSpells },
+        };
+      });
+    },
+
+    removeSpellFromCharacter: (slug) => {
+      applyActiveUpdate((current) => {
+        const known = (current.spells?.knownSlugs ?? []).filter((s) => s !== slug);
+        const prepared = (current.spells?.preparedSlugs ?? []).filter((s) => s !== slug);
+        const nextSpells = {
+          ...current.spells,
+          knownSlugs: known,
+          preparedSlugs: prepared,
+        };
+        return {
+          updated: { ...current, spells: nextSpells },
+          patch: { spells: nextSpells },
+        };
+      });
+    },
+
+    togglePreparedSpell: (slug) => {
+      applyActiveUpdate((current) => {
+        const prepared = current.spells?.preparedSlugs ?? [];
+        const isPrep = prepared.includes(slug);
+        const nextPrepared = isPrep
+          ? prepared.filter((s) => s !== slug)
+          : [...prepared, slug];
+        const nextSpells = {
+          ...current.spells,
+          preparedSlugs: nextPrepared,
+        };
+        return {
+          updated: { ...current, spells: nextSpells },
+          patch: { spells: nextSpells },
+        };
+      });
+    },
+
     resetAllSpellSlots: () => {
       applyActiveUpdate((current) => {
         const nextSlots: Record<string, { current: number; max: number }> = {};
@@ -716,6 +1011,56 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
         updated: { ...current, notes },
         patch: { notes },
       }));
+    },
+
+    saveActiveCharacter: async () => {
+      const { activeCharacterId, characters } = get();
+      if (!activeCharacterId) return;
+
+      const current = characters.find((c) => c.id === activeCharacterId);
+      if (!current) return;
+
+      const existingTimer = debounceTimers.get(activeCharacterId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        debounceTimers.delete(activeCharacterId);
+      }
+      pendingPatches.delete(activeCharacterId);
+
+      set({ isSaving: true });
+      const fullPatch: UpdateCharacterPatch = {
+        name: current.name,
+        level: current.level,
+        species: current.species,
+        class_name: current.class_name,
+        subclass_name: current.subclass_name,
+        stats: current.stats,
+        proficiencies: current.proficiencies,
+        hp: current.hp,
+        exhaustion: current.exhaustion,
+        custom_resources: current.custom_resources,
+        inventory: current.inventory,
+        weapon_attacks: current.weapon_attacks,
+        spells: current.spells,
+        notes: current.notes,
+      };
+
+      try {
+        await Promise.all([
+          fetch(`/api/characters/${activeCharacterId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fullPatch),
+          }),
+          new Promise((resolve) => setTimeout(resolve, 250)),
+        ]);
+      } catch (err) {
+        console.error('Failed to manually save character:', err);
+      } finally {
+        if (debounceTimers.size === 0) {
+          set({ isSaving: false });
+        }
+      }
     },
   };
 });

@@ -75,6 +75,17 @@ export const CompendiumEntrySchema = z.object({
 });
 export type CompendiumEntry = z.infer<typeof CompendiumEntrySchema>;
 
+export interface VaultFileNode {
+  name: string;
+  title: string;
+  path: string;
+  type: 'file' | 'directory';
+  fileCount?: number;
+  children?: VaultFileNode[];
+  size?: number;
+  updatedAt?: number;
+}
+
 // ============================================================================
 // Character Schemas (D&D 5.5e 2024 Ruleset)
 // ============================================================================
@@ -226,7 +237,7 @@ export type ResourceResetTrigger = z.infer<typeof ResourceResetTriggerSchema>;
 
 export const CustomResourceSchema = z.object({
   id: z.string(),
-  name: z.string().min(1),
+  name: z.string(),
   current: z.number().int().min(0),
   max: z.number().int().min(0),
   die_type: DieTypeSchema.optional(),
@@ -238,7 +249,8 @@ export type CustomResource = z.infer<typeof CustomResourceSchema>;
 export const InventoryItemSchema = z.object({
   id: z.string(),
   compendium_slug: z.string().optional(),
-  name: z.string().min(1),
+  name: z.string().default(''),
+  description: z.string().optional(),
   quantity: z.number().int().min(0).default(1),
   equipped: z.boolean().default(false),
   attuned: z.boolean().default(false),
@@ -292,11 +304,11 @@ export type CharacterSpells = z.infer<typeof CharacterSpellsSchema>;
 
 export const CharacterSchema = z.object({
   id: z.string().uuid(),
-  name: z.string().min(1),
-  player_name: z.string().min(1),
+  name: z.string(),
+  player_name: z.string(),
   level: z.number().int().min(1).max(20).default(1),
-  species: z.string().min(1),
-  class_name: z.string().min(1),
+  species: z.string(),
+  class_name: z.string(),
   subclass_name: z.string().nullable().default(null),
   stats: CharacterStatsSchema,
   proficiencies: CharacterProficienciesSchema,
@@ -312,21 +324,21 @@ export const CharacterSchema = z.object({
 export type Character = z.infer<typeof CharacterSchema>;
 
 export const CreateCharacterInputSchema = z.object({
-  name: z.string().trim().min(1).default('Новый персонаж'),
-  player_name: z.string().trim().min(1).default('Игрок'),
+  name: z.string().trim().default('Новый персонаж'),
+  player_name: z.string().trim().default('Игрок'),
   level: z.number().int().min(1).max(20).default(1),
-  species: z.string().trim().min(1).default('Человек'),
-  class_name: z.string().trim().min(1).default('Воин'),
+  species: z.string().trim().default('Человек'),
+  class_name: z.string().trim().default('Воин'),
   subclass_name: z.string().trim().nullable().default(null),
 });
 export type CreateCharacterInput = z.infer<typeof CreateCharacterInputSchema>;
 
 export const UpdateCharacterPatchSchema = z.object({
-  name: z.string().min(1).optional(),
-  player_name: z.string().min(1).optional(),
+  name: z.string().optional(),
+  player_name: z.string().optional(),
   level: z.number().int().min(1).max(20).optional(),
-  species: z.string().min(1).optional(),
-  class_name: z.string().min(1).optional(),
+  species: z.string().optional(),
+  class_name: z.string().optional(),
   subclass_name: z.string().nullable().optional(),
   stats: CharacterStatsSchema.optional(),
   proficiencies: CharacterProficienciesSchema.optional(),

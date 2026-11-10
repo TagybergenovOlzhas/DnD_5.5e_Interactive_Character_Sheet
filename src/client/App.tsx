@@ -1,13 +1,27 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { marked } from 'marked';
 import {
   BookOpen,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
   Feather,
+  FileText,
+  Filter,
+  Folder,
+  FolderOpen,
+  Loader2,
   Moon,
   MoreHorizontal,
   Plus,
+  RefreshCw,
   ScrollText,
+  Search,
+  Sparkles,
   Sun,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   calculateAbilityModifier,
@@ -27,9 +41,47 @@ import {
   DND55E_CONDITIONS,
   DND55E_SKILLS,
   type AbilityKey,
+  type CompendiumEntry,
   type ProficiencyRank,
+  type ResourceResetTrigger,
+  type VaultFileNode,
 } from '@shared/types';
 import { useCharacterStore } from './store';
+
+const SPELL_CLASSES = [
+  'Бард',
+  'Волшебник',
+  'Друид',
+  'Жрец',
+  'Колдун',
+  'Паладин',
+  'Следопыт',
+  'Чародей',
+] as const;
+
+const SPELL_SCHOOLS = [
+  'Воплощение',
+  'Вызов',
+  'Иллюзия',
+  'Некромантия',
+  'Ограждение',
+  'Очарование',
+  'Превращение',
+  'Прорицание',
+] as const;
+
+const SPELL_LEVEL_LABELS: Record<number, string> = {
+  0: 'Заговоры (0 круг)',
+  1: '1 круг',
+  2: '2 круг',
+  3: '3 круг',
+  4: '4 круг',
+  5: '5 круг',
+  6: '6 круг',
+  7: '7 круг',
+  8: '8 круг',
+  9: '9 круг',
+};
 
 const ABILITY_META: Record<AbilityKey, { short: string; full: string }> = {
   str: { short: 'СИЛ', full: 'Сила' },
@@ -354,24 +406,133 @@ export function App(): React.JSX.Element {
     setVisibleSpellSlotLevels,
     resetAllSpellSlots,
     setWeaponAttacks,
+    addCustomResource,
+    updateCustomResource,
+    deleteCustomResource,
+    addInventoryItem,
+    updateInventoryItem,
+    deleteInventoryItem,
+    addSpellToCharacter,
+    removeSpellFromCharacter,
+    togglePreparedSpell,
+    compendiumSpells,
+    fetchCompendiumSpells,
+    vaultTree,
+    vaultTotalFiles,
+    isVaultLoading,
+    isVaultSyncing,
+    fetchVaultTree,
+    syncVaultWithGit,
     takeShortRest,
     takeLongRest,
+    saveActiveCharacter,
   } = useCharacterStore();
 
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [night, setNight] = useState(
     () => window.localStorage.getItem('dnd-sheet-night') === '1'
   );
   const [activeDockTab, setActiveDockTab] = useState<DockTab>('sheet');
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
   const [weaponMenuId, setWeaponMenuId] = useState<string | null>(null);
+  const [resourceMenuId, setResourceMenuId] = useState<string | null>(null);
   const [allSkillsBonusDraft, setAllSkillsBonusDraft] = useState('');
   const skillMenuRef = useRef<HTMLDivElement>(null);
   const weaponMenuRef = useRef<HTMLDivElement>(null);
+  const resourceMenuRef = useRef<HTMLDivElement>(null);
+
+  // Spells & Compendium state
+  const [isSpellModalOpen, setIsSpellModalOpen] = useState(false);
+  const [spellSearchQuery, setSpellSearchQuery] = useState('');
+  const [spellLevelFilter, setSpellLevelFilter] = useState<number | 'all'>('all');
+  const [spellClassFilter, setSpellClassFilter] = useState<string>('all');
+  const [spellSchoolFilter, setSpellSchoolFilter] = useState<string>('all');
+  const [spellConcentrationFilter, setSpellConcentrationFilter] = useState<boolean>(false);
+  const [spellRitualFilter, setSpellRitualFilter] = useState<boolean>(false);
+  const [expandedSpellSlugs, setExpandedSpellSlugs] = useState<Set<string>>(new Set());
+
+  // Library / Obsidian Vault state
+  const [selectedVaultFilePath, setSelectedVaultFilePath] = useState<string | null>(null);
+  const [selectedVaultFile, setSelectedVaultFile] = useState<{
+    path: string;
+    title: string;
+    content: string;
+    updatedAt?: number;
+  } | null>(null);
+  const [isVaultFileLoading, setIsVaultFileLoading] = useState(false);
+  const [vaultSearchQuery, setVaultSearchQuery] = useState('');
+  const [expandedVaultFolders, setExpandedVaultFolders] = useState<Set<string>>(
+    () => new Set(['Справочник'])
+  );
+
+  const toggleVaultFolder = (folderPath: string) => {
+    setExpandedVaultFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderPath)) {
+        next.delete(folderPath);
+      } else {
+        next.add(folderPath);
+      }
+      return next;
+    });
+  };
+
+  const expandAllVaultFolders = () => {
+    const allDirs = new Set<string>();
+    function collect(nodes: VaultFileNode[]) {
+      for (const n of nodes) {
+        if (n.type === 'directory') {
+          allDirs.add(n.path);
+          if (n.children) collect(n.children);
+        }
+      }
+    }
+    collect(vaultTree);
+    setExpandedVaultFolders(allDirs);
+  };
+
+  const collapseAllVaultFolders = () => {
+    setExpandedVaultFolders(new Set());
+  };
+
+  const loadVaultFile = async (filePath: string) => {
+    setSelectedVaultFilePath(filePath);
+    setIsVaultFileLoading(true);
+    try {
+      const res = await fetch(`/api/vault/file?path=${encodeURIComponent(filePath)}`);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          path: string;
+          title: string;
+          content: string;
+          updatedAt?: number;
+        };
+        setSelectedVaultFile(data);
+      }
+    } catch (err) {
+      console.error('Failed to load vault file:', err);
+    } finally {
+      setIsVaultFileLoading(false);
+    }
+  };
+
+  const toggleSpellExpanded = (slug: string) => {
+    setExpandedSpellSlugs((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) {
+        next.delete(slug);
+      } else {
+        next.add(slug);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     void fetchCharacters();
-  }, [fetchCharacters]);
+    void fetchCompendiumSpells();
+    void fetchVaultTree();
+  }, [fetchCharacters, fetchCompendiumSpells, fetchVaultTree]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('night', night);
@@ -381,9 +542,10 @@ export function App(): React.JSX.Element {
   const activeCharacter = characters.find((c) => c.id === activeCharacterId) ?? null;
 
   useEffect(() => {
-    setConfirmDelete(false);
+    setConfirmDeleteId(null);
     setSkillMenuOpen(false);
     setWeaponMenuId(null);
+    setResourceMenuId(null);
     setAllSkillsBonusDraft('');
   }, [activeCharacterId]);
 
@@ -427,6 +589,26 @@ export function App(): React.JSX.Element {
     };
   }, [weaponMenuId]);
 
+  useEffect(() => {
+    if (!resourceMenuId) return;
+
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!resourceMenuRef.current?.contains(event.target as Node)) {
+        setResourceMenuId(null);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setResourceMenuId(null);
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [resourceMenuId]);
+
   const applyBonusToAllSkills = (): void => {
     const trimmed = allSkillsBonusDraft.trim();
     if (!/^[+-]?\d+$/.test(trimmed)) return;
@@ -437,11 +619,468 @@ export function App(): React.JSX.Element {
     setSkillMenuOpen(false);
   };
 
-  if (isLoading || !activeCharacter) {
+  const knownSlugs = activeCharacter?.spells?.knownSlugs ?? [];
+  const preparedSlugs = activeCharacter?.spells?.preparedSlugs ?? [];
+
+  const characterSpellsByLevel = useMemo(() => {
+    const groups: Record<number, CompendiumEntry[]> = {};
+    for (const slug of knownSlugs) {
+      const entry =
+        compendiumSpells.find((s) => s.slug === slug) ??
+        ({
+          id: slug,
+          slug,
+          title: slug,
+          category: 'spell',
+          source: 'obsidian',
+          raw_content: '',
+          metadata: { spellLevel: 0 },
+          updated_at: 0,
+        } as CompendiumEntry);
+      const lvl = (entry.metadata as { spellLevel?: number } | undefined)?.spellLevel ?? 0;
+      if (!groups[lvl]) groups[lvl] = [];
+      groups[lvl]!.push(entry);
+    }
+    return groups;
+  }, [knownSlugs, compendiumSpells]);
+
+  const filteredCompendiumSpells = useMemo(() => {
+    return compendiumSpells.filter((spell) => {
+      const meta = spell.metadata as
+        | {
+            spellLevel?: number;
+            school?: string;
+            classes?: string[];
+            concentration?: boolean;
+            ritual?: boolean;
+            ruName?: string;
+            enName?: string;
+          }
+        | undefined;
+
+      if (spellSearchQuery.trim()) {
+        const q = spellSearchQuery.toLowerCase().trim();
+        const matchTitle = spell.title.toLowerCase().includes(q);
+        const matchDesc = spell.raw_content ? spell.raw_content.toLowerCase().includes(q) : false;
+        const matchRu = meta?.ruName ? meta.ruName.toLowerCase().includes(q) : false;
+        const matchEn = meta?.enName ? meta.enName.toLowerCase().includes(q) : false;
+        if (!matchTitle && !matchDesc && !matchRu && !matchEn) return false;
+      }
+
+      if (spellLevelFilter !== 'all') {
+        if (meta?.spellLevel !== spellLevelFilter) return false;
+      }
+
+      if (spellClassFilter !== 'all') {
+        const classes = meta?.classes ?? [];
+        if (!classes.some((c) => c.toLowerCase() === spellClassFilter.toLowerCase())) {
+          return false;
+        }
+      }
+
+      if (spellSchoolFilter !== 'all') {
+        if (meta?.school?.toLowerCase() !== spellSchoolFilter.toLowerCase()) {
+          return false;
+        }
+      }
+
+      if (spellConcentrationFilter && !meta?.concentration) {
+        return false;
+      }
+
+      if (spellRitualFilter && !meta?.ritual) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [
+    compendiumSpells,
+    spellSearchQuery,
+    spellLevelFilter,
+    spellClassFilter,
+    spellSchoolFilter,
+    spellConcentrationFilter,
+    spellRitualFilter,
+  ]);
+
+  const filteredVaultTree = useMemo(() => {
+    if (!vaultSearchQuery.trim()) return vaultTree;
+    const q = vaultSearchQuery.toLowerCase().trim();
+
+    function filterNodes(nodes: VaultFileNode[]): VaultFileNode[] {
+      const res: VaultFileNode[] = [];
+      for (const node of nodes) {
+        if (node.type === 'file') {
+          if (
+            node.title.toLowerCase().includes(q) ||
+            node.name.toLowerCase().includes(q)
+          ) {
+            res.push(node);
+          }
+        } else if (node.type === 'directory') {
+          const filteredChildren = filterNodes(node.children ?? []);
+          const dirMatches = node.name.toLowerCase().includes(q);
+          if (dirMatches || filteredChildren.length > 0) {
+            res.push({
+              ...node,
+              children: dirMatches ? node.children : filteredChildren,
+              fileCount: filteredChildren.length,
+            });
+          }
+        }
+      }
+      return res;
+    }
+
+    return filterNodes(vaultTree);
+  }, [vaultTree, vaultSearchQuery]);
+
+  useEffect(() => {
+    if (vaultSearchQuery.trim()) {
+      const allDirs = new Set<string>();
+      function collect(nodes: VaultFileNode[]) {
+        for (const n of nodes) {
+          if (n.type === 'directory') {
+            allDirs.add(n.path);
+            if (n.children) collect(n.children);
+          }
+        }
+      }
+      collect(filteredVaultTree);
+      setExpandedVaultFolders(allDirs);
+    }
+  }, [vaultSearchQuery, filteredVaultTree]);
+
+  const matchingSpellForSelectedVaultFile = useMemo(() => {
+    if (!selectedVaultFile) return null;
+    const cleanTitle = selectedVaultFile.title.toLowerCase().trim();
+    return (
+      compendiumSpells.find((s) => {
+        const meta = s.metadata as
+          | { ruName?: string; enName?: string }
+          | undefined;
+        const sTitle = s.title.toLowerCase().trim();
+        const sRu = meta?.ruName?.toLowerCase().trim() || '';
+        const sEn = meta?.enName?.toLowerCase().trim() || '';
+        return (
+          sTitle === cleanTitle ||
+          sRu === cleanTitle ||
+          cleanTitle.startsWith(sTitle) ||
+          cleanTitle.startsWith(sRu)
+        );
+      }) ?? null
+    );
+  }, [selectedVaultFile, compendiumSpells]);
+
+  const renderMarkdown = (content: string): string => {
+    if (!content) return '';
+    const preprocessed = content.replace(
+      /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
+      (_match, target, label) => {
+        const display = (label || target).trim();
+        return `<span class="wiki-link inline-flex items-center px-1.5 py-0.5 rounded bg-[var(--card)] text-[var(--sage)] font-serif text-xs font-semibold underline decoration-dotted cursor-pointer hover:text-[var(--ink)] transition-colors" data-wiki-target="${target.trim()}">${display}</span>`;
+      }
+    );
+    try {
+      return marked.parse(preprocessed, { breaks: true, gfm: true }) as string;
+    } catch {
+      return preprocessed;
+    }
+  };
+
+  const handleMarkdownClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = (e.target as HTMLElement).closest(
+      '[data-wiki-target]'
+    ) as HTMLElement | null;
+    if (target?.dataset.wikiTarget) {
+      const wikiTarget = target.dataset.wikiTarget;
+      function findNode(nodes: VaultFileNode[]): VaultFileNode | null {
+        const cleanTarget = wikiTarget.toLowerCase().trim().replace(/\.md$/i, '');
+        for (const n of nodes) {
+          if (n.type === 'file') {
+            const t1 = n.title.toLowerCase().trim();
+            const t2 = n.name.toLowerCase().trim().replace(/\.md$/i, '');
+            if (t1 === cleanTarget || t2 === cleanTarget || t1.includes(cleanTarget)) {
+              return n;
+            }
+          } else if (n.children) {
+            const f = findNode(n.children);
+            if (f) return f;
+          }
+        }
+        return null;
+      }
+      const found = findNode(vaultTree);
+      if (found) {
+        void loadVaultFile(found.path);
+      }
+    }
+  };
+
+  const renderVaultTreeNode = (
+    node: VaultFileNode,
+    depth: number = 0
+  ): React.ReactNode => {
+    if (node.type === 'directory') {
+      const isExpanded = expandedVaultFolders.has(node.path);
+      const indentPadding = depth * 12;
+
+      return (
+        <div key={node.path} className="select-none">
+          <div
+            onClick={() => toggleVaultFolder(node.path)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleVaultFolder(node.path);
+              }
+            }}
+            style={{ paddingLeft: `${indentPadding + 6}px` }}
+            className="flex items-center justify-between py-1.5 pr-2 rounded-xl text-xs hover:bg-[var(--paper)] cursor-pointer transition-colors group"
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-[var(--muted)] group-hover:text-[var(--ink)] transition-transform duration-150">
+                {isExpanded ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+              </span>
+              <span className="text-[var(--ochre)]">
+                {isExpanded ? (
+                  <FolderOpen className="w-4 h-4" />
+                ) : (
+                  <Folder className="w-4 h-4" />
+                )}
+              </span>
+              <span className="font-medium text-[var(--ink)] truncate">
+                {node.name}
+              </span>
+            </div>
+            {node.fileCount !== undefined && node.fileCount > 0 && (
+              <span className="text-[10px] text-[var(--muted)] bg-[var(--paper)] px-1.5 py-0.5 rounded-full tabular-nums shrink-0">
+                {node.fileCount}
+              </span>
+            )}
+          </div>
+
+          {isExpanded && node.children && node.children.length > 0 && (
+            <div className="space-y-0.5">
+              {node.children.map((child) =>
+                renderVaultTreeNode(child, depth + 1)
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const isSelected = selectedVaultFilePath === node.path;
+    const indentPadding = depth * 12;
+
+    return (
+      <div
+        key={node.path}
+        onClick={() => void loadVaultFile(node.path)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            void loadVaultFile(node.path);
+          }
+        }}
+        style={{ paddingLeft: `${indentPadding + 20}px` }}
+        className={`flex items-center justify-between py-1.5 pr-2 rounded-xl text-xs cursor-pointer transition-all ${
+          isSelected
+            ? 'bg-[var(--ink)] text-[var(--paper)] font-medium shadow-xs'
+            : 'text-[var(--ink)] hover:bg-[var(--paper)]'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 min-w-0">
+          <FileText
+            className={`w-3.5 h-3.5 shrink-0 ${
+              isSelected ? 'text-[var(--paper)]' : 'text-[var(--sage)]'
+            }`}
+          />
+          <span className="truncate">{node.title}</span>
+        </div>
+      </div>
+    );
+  };
+
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)] flex items-center justify-center p-8">
         <div className="font-serif italic text-xl text-[var(--muted)]">
           Раскрываем страницы журнала персонажа...
+        </div>
+      </div>
+    );
+  }
+
+  if (!activeCharacter) {
+    return (
+      <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)] pb-16">
+        <div className="max-w-[1320px] mx-auto px-5 py-6 space-y-6">
+          <header className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-[color-mix(in_srgb,var(--muted)_20%,transparent)] pb-4">
+            <div className="space-y-1">
+              <span className="block text-[10px] uppercase tracking-[0.2em] text-[var(--muted)] font-medium">
+                Редакция правил 2024
+              </span>
+              <h1 className="font-serif text-3xl md:text-4xl tracking-tight text-[var(--ink)] leading-tight">
+                Интерактивный Лист персонажа DnD 5.5е
+              </h1>
+            </div>
+
+            <div className="flex items-center gap-2.5 self-start sm:self-end">
+              <button
+                type="button"
+                aria-label={night ? 'Дневной режим' : 'Ночной режим'}
+                aria-pressed={night}
+                title={night ? 'Дневной режим' : 'Ночной режим'}
+                onClick={() => setNight((value) => !value)}
+                className="w-9 h-9 rounded-full bg-[var(--card)] text-[var(--ochre)] hover:bg-[var(--ink)] hover:text-[var(--paper)] inline-flex items-center justify-center transition-colors duration-300 cursor-pointer"
+              >
+                <span
+                  className={`inline-flex transition-transform duration-700 ease-out ${
+                    night ? 'rotate-[360deg]' : 'rotate-0'
+                  }`}
+                >
+                  {night ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                </span>
+              </button>
+
+              {characters.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void createCharacter()}
+                  className="rounded-full bg-[var(--ink)] text-[var(--paper)] hover:bg-[color-mix(in_srgb,var(--ink)_90%,transparent)] px-4 py-2 text-xs uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Создать персонажа</span>
+                </button>
+              )}
+            </div>
+          </header>
+
+          {characters.length === 0 ? (
+            <section className="bg-[var(--card)] rounded-2xl p-10 md:p-14 flex flex-col items-center justify-center text-center space-y-4">
+              <div className="space-y-1.5 max-w-md">
+                <h2 className="font-serif text-2xl text-[var(--ink)]">
+                  Список персонажей пуст
+                </h2>
+                <p className="font-serif italic text-base text-[var(--muted)]">
+                  Создайте своего первого героя, чтобы перейти к заполнению листа персонажа.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void createCharacter()}
+                className="rounded-full bg-[var(--ink)] text-[var(--paper)] hover:bg-[color-mix(in_srgb,var(--ink)_90%,transparent)] px-6 py-2.5 text-xs uppercase tracking-[0.15em] font-semibold inline-flex items-center gap-2 transition-transform active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Создать персонажа</span>
+              </button>
+            </section>
+          ) : (
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                  Выбор персонажа ({characters.length})
+                </h2>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {characters.map((char) => {
+                  const charName = char.name.trim() || 'Новый персонаж';
+                  const identityParts = [
+                    char.species.trim(),
+                    char.class_name.trim(),
+                    (char.subclass_name ?? '').trim(),
+                  ].filter(Boolean);
+                  const identitySubtitle =
+                    identityParts.length > 0
+                      ? identityParts.join(' • ')
+                      : 'Вид и класс не указаны';
+                  const isConfirmingDelete = confirmDeleteId === char.id;
+
+                  return (
+                    <div
+                      key={char.id}
+                      onClick={() => selectCharacter(char.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          selectCharacter(char.id);
+                        }
+                      }}
+                      className="group bg-[var(--card)] rounded-2xl p-4 hover:ring-1 hover:ring-[var(--ink)] transition-all cursor-pointer text-left"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <span className="font-serif italic text-sm text-[var(--muted)] truncate block">
+                            {identitySubtitle}
+                          </span>
+                          <h3 className="font-serif text-2xl leading-tight text-[var(--ink)] truncate">
+                            {charName}
+                          </h3>
+                        </div>
+
+                        <div className="flex flex-col items-end gap-2 shrink-0">
+                          <span className="rounded-full bg-[var(--paper)] px-2.5 py-0.5 text-[10px] uppercase tracking-[0.12em] font-semibold text-[var(--ink)] tabular-nums">
+                            Ур. {char.level}
+                          </span>
+
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => e.stopPropagation()}
+                          >
+                            {!isConfirmingDelete ? (
+                              <button
+                                type="button"
+                                aria-label={`Удалить персонажа ${charName}`}
+                                title="Удалить персонажа"
+                                onClick={() => setConfirmDeleteId(char.id)}
+                                className="w-7 h-7 rounded-full bg-[var(--paper)] hover:bg-[color-mix(in_srgb,var(--clay)_20%,transparent)] text-[var(--muted)] hover:text-[var(--clay)] inline-flex items-center justify-center transition-colors cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <div className="rounded-full bg-[var(--clay)] text-[var(--paper)] px-2.5 py-0.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wider">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setConfirmDeleteId(null);
+                                    void deleteCharacter(char.id);
+                                  }}
+                                  className="font-bold underline cursor-pointer"
+                                >
+                                  Да
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="opacity-80 hover:opacity-100 cursor-pointer"
+                                >
+                                  Нет
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
         </div>
       </div>
     );
@@ -459,7 +1098,14 @@ export function App(): React.JSX.Element {
     exhaustion,
     spells,
     weapon_attacks: weaponAttacks,
+    custom_resources: customResources = [],
+    inventory = [],
   } = activeCharacter;
+
+  const totalInventoryWeight = inventory.reduce(
+    (acc, item) => acc + (item.weight ?? 0) * (item.quantity ?? 1),
+    0
+  );
 
   const profBonus = calculateProficiencyBonus(level);
   const baseSpeedFeet = hp.speed ?? 30;
@@ -537,12 +1183,12 @@ export function App(): React.JSX.Element {
   const passiveShown = passivePerception - (checkHindrance.length > 0 ? 5 : 0);
 
   return (
-    <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)] pb-16">
+    <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)] pb-6">
       <div className="max-w-[1320px] mx-auto px-5 py-3.5 space-y-3.5">
         {/* =================================================================== */}
         {/* EDITORIAL HEADER (Compact for 14" laptop screen)                    */}
         {/* =================================================================== */}
-        <header className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
+        <header className="flex flex-col xl:flex-row xl:items-end justify-between gap-3">
           {/* Left: Italic Species / Class / Subclass + Large Serif Character Name */}
           <div className="space-y-0.5 flex-1 min-w-0">
             <div className="flex flex-row flex-wrap items-baseline gap-x-3 gap-y-0.5 font-serif italic text-base md:text-lg text-[var(--muted)]">
@@ -585,60 +1231,72 @@ export function App(): React.JSX.Element {
             </div>
           </div>
 
-          {/* Right: Tactile Pills for Character Switcher, New Character, Level, Delete */}
-          <div className="flex flex-wrap items-center gap-2 self-start lg:self-end">
+          {/* Right: Unified Navigation & Controls Cluster with gray/card background */}
+          <div className="bg-[var(--card)] rounded-full p-1.5 flex flex-wrap items-center gap-1.5 self-start xl:self-end">
             <button
               type="button"
-              aria-label={night ? 'Дневной режим' : 'Ночной режим'}
-              aria-pressed={night}
-              title={night ? 'Дневной режим' : 'Ночной режим'}
-              onClick={() => setNight((value) => !value)}
-              className="w-8 h-8 rounded-full bg-[var(--card)] text-[var(--ochre)] hover:bg-[var(--ink)] hover:text-[var(--paper)] inline-flex items-center justify-center transition-colors duration-300 cursor-pointer"
+              onClick={() => selectCharacter(null)}
+              title="Вернуться к выбору персонажей"
+              className="rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] px-3 py-1.5 text-xs uppercase tracking-wider font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
             >
-              <span
-                className={`inline-flex transition-transform duration-700 ease-out ${
-                  night ? 'rotate-[360deg]' : 'rotate-0'
+              <span>← Персонажи</span>
+            </button>
+
+            {/* Navigation Tabs Pill (light/dark harmonious, no inversion) */}
+            <nav
+              aria-label="Режимы листа персонажа"
+              className="flex items-center gap-1"
+            >
+              <button
+                type="button"
+                onClick={() => setActiveDockTab('sheet')}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider font-semibold inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                  activeDockTab === 'sheet'
+                    ? 'bg-[var(--paper)] text-[var(--ink)] shadow-xs'
+                    : 'text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[color-mix(in_srgb,var(--paper)_60%,transparent)]'
                 }`}
               >
-                {night ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-              </span>
-            </button>
-            <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium mr-1">
-              {isSaving ? 'Сохранение...' : 'Сохранено'}
-            </span>
+                <ScrollText className="w-3.5 h-3.5" />
+                <span>Основной лист</span>
+              </button>
 
-            {/* Character Selector Pill */}
-            <div className="rounded-full bg-[var(--card)] px-3.5 py-1.5 flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
-                Герой
-              </span>
-              <select
-                aria-label="Выбор персонажа"
-                value={activeCharacter.id}
-                onChange={(e) => selectCharacter(e.target.value)}
-                className="bg-transparent text-xs uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer pr-1"
+              <button
+                type="button"
+                onClick={() => setActiveDockTab('inventory')}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider font-semibold inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                  activeDockTab === 'inventory'
+                    ? 'bg-[var(--paper)] text-[var(--ink)] shadow-xs'
+                    : 'text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[color-mix(in_srgb,var(--paper)_60%,transparent)]'
+                }`}
               >
-                {characters.map((char) => (
-                  <option
-                    key={char.id}
-                    value={char.id}
-                    className="bg-[var(--paper)] text-[var(--ink)]"
-                  >
-                    {char.name} ({char.class_name} {char.level})
-                  </option>
-                ))}
-              </select>
-            </div>
+                <Feather className="w-3.5 h-3.5 text-[var(--ochre)]" />
+                <span>Инвентарь и Заклинания</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveDockTab('compendium')}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider font-semibold inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                  activeDockTab === 'compendium'
+                    ? 'bg-[var(--paper)] text-[var(--ink)] shadow-xs'
+                    : 'text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[color-mix(in_srgb,var(--paper)_60%,transparent)]'
+                }`}
+              >
+                <BookOpen className="w-3.5 h-3.5 text-[var(--sage)]" />
+                <span className="hidden sm:inline">Библиотека Obsidian</span>
+                <span className="sm:hidden">Библиотека</span>
+              </button>
+            </nav>
 
             {/* Level Selector Pill */}
-            <div className="rounded-full bg-[var(--card)] px-3 py-1 flex items-center gap-1.5">
+            <div className="rounded-full bg-[var(--paper)] px-3 py-1 flex items-center gap-1.5">
               <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
                 Ур.
               </span>
               <button
                 type="button"
                 onClick={() => setLevel(level - 1)}
-                className="w-5 h-5 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-xs font-bold flex items-center justify-center transition-colors cursor-pointer"
+                className="w-5 h-5 rounded-full bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-xs font-bold flex items-center justify-center transition-colors cursor-pointer"
               >
                 −
               </button>
@@ -653,58 +1311,56 @@ export function App(): React.JSX.Element {
               <button
                 type="button"
                 onClick={() => setLevel(level + 1)}
-                className="w-5 h-5 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-xs font-bold flex items-center justify-center transition-colors cursor-pointer"
+                className="w-5 h-5 rounded-full bg-[var(--card)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-xs font-bold flex items-center justify-center transition-colors cursor-pointer"
               >
                 +
               </button>
             </div>
 
-            {/* Create New Character Ink Pill Button */}
+            {/* Day / Night Theme Toggle */}
             <button
               type="button"
-              onClick={() => void createCharacter()}
-              className="rounded-full bg-[var(--ink)] text-[var(--paper)] hover:bg-[color-mix(in_srgb,var(--ink)_90%,transparent)] px-3.5 py-1.5 text-xs uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 cursor-pointer"
+              aria-label={night ? 'Дневной режим' : 'Ночной режим'}
+              aria-pressed={night}
+              title={night ? 'Дневной режим' : 'Ночной режим'}
+              onClick={() => setNight((value) => !value)}
+              className="w-8 h-8 rounded-full bg-[var(--paper)] text-[var(--ochre)] hover:bg-[var(--ink)] hover:text-[var(--paper)] inline-flex items-center justify-center transition-colors duration-300 cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Создать персонажа</span>
+              <span
+                className={`inline-flex transition-transform duration-700 ease-out ${
+                  night ? 'rotate-[360deg]' : 'rotate-0'
+                }`}
+              >
+                {night ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </span>
             </button>
 
-            {/* Delete Character Pill Button (with confirmation) */}
-            {!confirmDelete ? (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                title="Удалить персонажа"
-                className="rounded-full bg-[var(--card)] hover:bg-[color-mix(in_srgb,var(--clay)_20%,transparent)] text-[var(--muted)] hover:text-[var(--clay)] px-3 py-1.5 text-xs uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            ) : (
-              <div className="rounded-full bg-[var(--clay)] text-[var(--paper)] px-3.5 py-1 flex items-center gap-2 text-xs uppercase tracking-wider">
-                <span>Удалить?</span>
-                <button
-                  type="button"
-                  onClick={() => void deleteCharacter(activeCharacter.id)}
-                  className="font-bold underline cursor-pointer"
-                >
-                  Да
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  className="opacity-80 hover:opacity-100 cursor-pointer"
-                >
-                  Нет
-                </button>
-              </div>
-            )}
+            {/* Manual Save Status / Trigger Icon Button */}
+            <button
+              type="button"
+              aria-label={isSaving ? 'Сохранение изменений...' : 'Сохранено (нажмите для сохранения)'}
+              title={isSaving ? 'Сохранение изменений...' : 'Все изменения сохранены (нажмите, чтобы сохранить вручную)'}
+              onClick={() => void saveActiveCharacter()}
+              className={`w-8 h-8 rounded-full inline-flex items-center justify-center transition-all cursor-pointer ${
+                isSaving
+                  ? 'bg-[var(--paper)] text-[var(--muted)]'
+                  : 'bg-[var(--paper)] text-[var(--sage)] hover:bg-[var(--sage)] hover:text-[var(--paper)]'
+              }`}
+            >
+              {isSaving ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Check className="w-4 h-4 stroke-[2.5]" />
+              )}
+            </button>
           </div>
         </header>
 
         {/* =================================================================== */}
         {/* MAIN WORKSPACE (Optimized to fit 14" Laptop Viewport at once)       */}
         {/* =================================================================== */}
-        <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+        {activeDockTab === 'sheet' && (
+          <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
           <div className="flex flex-col gap-4">
             <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1588,9 +2244,16 @@ export function App(): React.JSX.Element {
                       },
                     ])
                   }
-                  className="w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm font-bold leading-none flex items-center justify-center transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default"
+                  className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[var(--paper)] disabled:hover:text-[var(--ink)]"
                 >
-                  +
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-[1.5px] w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-2.5 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
                 </button>
               </div>
 
@@ -1810,6 +2473,221 @@ export function App(): React.JSX.Element {
               })}
             </section>
 
+            {/* Special Features / Custom Resources (Особые умения) */}
+            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                  Особые умения
+                </h2>
+                <button
+                  type="button"
+                  aria-label="Добавить особое умение"
+                  title="Добавить умение"
+                  disabled={customResources.length >= 20}
+                  onClick={() =>
+                    addCustomResource({
+                      name: '',
+                      max: 1,
+                      current: 1,
+                      reset_on: 'long_rest',
+                    })
+                  }
+                  className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[var(--paper)] disabled:hover:text-[var(--ink)]"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-[1.5px] w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-2.5 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
+                </button>
+              </div>
+
+              {customResources.map((resource) => {
+                const description = (resource.description ?? '').trim();
+                const restTitle =
+                  resource.reset_on === 'short_rest'
+                    ? 'Восстанавливается в короткий отдых'
+                    : resource.reset_on === 'long_rest'
+                      ? 'Восстанавливается в долгий отдых'
+                      : 'Восстанавливается вручную';
+
+                return (
+                  <div
+                    key={resource.id}
+                    className="bg-[var(--paper)] rounded-xl px-2.5 py-2 space-y-1.5"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <div
+                        className="relative shrink-0"
+                        ref={resourceMenuId === resource.id ? resourceMenuRef : undefined}
+                      >
+                        <button
+                          type="button"
+                          aria-label="Настройки и описание умения"
+                          aria-expanded={resourceMenuId === resource.id}
+                          onClick={() =>
+                            setResourceMenuId((current) =>
+                              current === resource.id ? null : resource.id
+                            )
+                          }
+                          className={`w-6 h-6 rounded-full inline-flex items-center justify-center cursor-pointer ${
+                            resourceMenuId === resource.id
+                              ? 'bg-[var(--ink)] text-[var(--paper)]'
+                              : 'text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--ink)]'
+                          }`}
+                        >
+                          <MoreHorizontal className="w-4 h-4" />
+                        </button>
+                        {resourceMenuId === resource.id && (
+                          <div className="absolute left-0 top-full mt-1.5 z-50 w-60 rounded-2xl bg-[var(--paper)] p-2.5 shadow-lg ring-1 ring-[var(--stone)] space-y-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                                Использований
+                              </span>
+                              <EditableNumberInput
+                                min={1}
+                                max={30}
+                                value={resource.max}
+                                onChange={(val) => {
+                                  const nextMax = Math.max(1, Math.min(30, val));
+                                  const nextCurrent =
+                                    resource.current === resource.max
+                                      ? nextMax
+                                      : Math.min(resource.current, nextMax);
+                                  updateCustomResource(resource.id, {
+                                    max: nextMax,
+                                    current: nextCurrent,
+                                  });
+                                }}
+                                ariaLabel="Максимум использований"
+                                className="w-12 h-6 rounded-full bg-[var(--card)] text-center text-xs font-semibold text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
+                              />
+                            </div>
+
+                            <label className="block space-y-1">
+                              <span className="block text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                                Восстановление
+                              </span>
+                              <select
+                                aria-label="Восстановление умения"
+                                value={resource.reset_on}
+                                onChange={(e) =>
+                                  updateCustomResource(resource.id, {
+                                    reset_on: e.target.value as ResourceResetTrigger,
+                                  })
+                                }
+                                className="w-full bg-[var(--card)] rounded-full px-2.5 py-1 text-[10px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer"
+                              >
+                                <option value="short_rest">Короткий отдых</option>
+                                <option value="long_rest">Долгий отдых</option>
+                                <option value="manual">Вручную</option>
+                              </select>
+                            </label>
+
+                            <label className="block space-y-1">
+                              <span className="block text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                                Описание
+                              </span>
+                              <textarea
+                                value={resource.description ?? ''}
+                                maxLength={400}
+                                rows={3}
+                                placeholder="Описание умения"
+                                aria-label="Описание особого умения"
+                                onChange={(e) =>
+                                  updateCustomResource(resource.id, {
+                                    description: e.target.value,
+                                  })
+                                }
+                                className="w-full resize-none rounded-lg bg-[var(--card)] px-2 py-1.5 text-xs leading-snug text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_60%,transparent)]"
+                              />
+                            </label>
+                          </div>
+                        )}
+                      </div>
+
+                      <input
+                        type="text"
+                        value={resource.name}
+                        maxLength={80}
+                        placeholder="Название умения"
+                        aria-label="Название особого умения"
+                        onChange={(e) =>
+                          updateCustomResource(resource.id, { name: e.target.value })
+                        }
+                        className="min-w-0 flex-1 bg-transparent font-serif text-base leading-none text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_50%,transparent)]"
+                      />
+
+                      <button
+                        type="button"
+                        aria-label={`Удалить умение ${resource.name || ''}`.trim()}
+                        onClick={() => deleteCustomResource(resource.id)}
+                        className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm leading-none flex items-center justify-center cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </div>
+
+                    {description !== '' && (
+                      <p className="text-[11px] leading-snug text-[var(--muted)] whitespace-pre-wrap">
+                        {description}
+                      </p>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                      <div
+                        className="inline-flex items-center gap-1.5 rounded-full bg-[var(--card)] px-2.5 py-1 text-xs font-semibold tabular-nums text-[var(--ink)]"
+                        title={restTitle}
+                      >
+                        {resource.reset_on === 'short_rest' && (
+                          <Sun className="w-3.5 h-3.5 text-[var(--ochre)] shrink-0" />
+                        )}
+                        {resource.reset_on === 'long_rest' && (
+                          <Moon className="w-3.5 h-3.5 text-[var(--ochre)] shrink-0" />
+                        )}
+                        <span>
+                          {resource.current}/{resource.max}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+                        {Array.from({ length: resource.max }).map((_, idx) => {
+                          const isAvailable = idx < resource.current;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              aria-label={`Использование ${idx + 1} (${
+                                isAvailable ? 'доступно' : 'потрачено'
+                              })`}
+                              onClick={() => {
+                                const nextCurrent =
+                                  isAvailable && idx + 1 === resource.current ? idx : idx + 1;
+                                updateCustomResource(resource.id, { current: nextCurrent });
+                              }}
+                              title={
+                                isAvailable
+                                  ? 'Доступно (нажмите, чтобы потратить)'
+                                  : 'Потрачено (нажмите, чтобы восстановить)'
+                              }
+                              className={`w-5 h-5 rounded-full transition-all cursor-pointer ${
+                                isAvailable
+                                  ? 'bg-[var(--ink)]'
+                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--ink)]'
+                              }`}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+
             <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
               <h2 className="pl-2 text-[10px] uppercase tracking-[0.15em] font-medium leading-none text-[var(--muted)]">
                 СОСТОЯНИЯ
@@ -1885,57 +2763,966 @@ export function App(): React.JSX.Element {
 
           </div>
         </main>
+        )}
+
+        {/* =================================================================== */}
+        {/* INVENTORY & SPELLS WORKSPACE                                        */}
+        {/* =================================================================== */}
+        {activeDockTab === 'inventory' && (
+          <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+            {/* Left Column: Inventory */}
+            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                    ИНВЕНТАРЬ
+                  </h2>
+                  {totalInventoryWeight > 0 && (
+                    <span className="rounded-full bg-[var(--paper)] px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--muted)] tabular-nums">
+                      Вес: {Math.round(totalInventoryWeight * 10) / 10} фт
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  aria-label="Добавить предмет в инвентарь"
+                  title="Добавить предмет"
+                  onClick={() =>
+                    addInventoryItem({
+                      name: '',
+                      description: '',
+                      weight: 0,
+                    })
+                  }
+                  className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-[1.5px] w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-1/2 top-1/2 h-2.5 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                  />
+                </button>
+              </div>
+
+              {inventory.map((item) => (
+                <div
+                  key={item.id}
+                  className="bg-[var(--paper)] rounded-xl px-2.5 py-2 space-y-1.5"
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={item.name}
+                      maxLength={80}
+                      placeholder="Название предмета"
+                      aria-label="Название предмета"
+                      onChange={(e) =>
+                        updateInventoryItem(item.id, { name: e.target.value })
+                      }
+                      className="min-w-0 flex-1 bg-transparent font-serif text-base leading-none text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_50%,transparent)]"
+                    />
+
+                    {/* Weight Input */}
+                    <div className="flex items-center gap-1 shrink-0 bg-[var(--card)] rounded-full px-2 py-0.5">
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={item.weight === 0 ? '' : item.weight}
+                        placeholder="0"
+                        aria-label="Вес предмета в фунтах"
+                        title="Вес в фунтах"
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          updateInventoryItem(item.id, {
+                            weight: isNaN(val) ? 0 : Math.max(0, val),
+                          });
+                        }}
+                        className="w-9 bg-transparent text-center text-xs font-semibold tabular-nums text-[var(--ink)] outline-none"
+                      />
+                      <span className="text-[9px] uppercase tracking-wider text-[var(--muted)] font-medium">
+                        фт
+                      </span>
+                    </div>
+
+                    {/* Delete button */}
+                    <button
+                      type="button"
+                      aria-label={`Удалить предмет ${item.name || ''}`.trim()}
+                      onClick={() => deleteInventoryItem(item.id)}
+                      className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm leading-none flex items-center justify-center cursor-pointer transition-colors"
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  {/* Description Field */}
+                  <textarea
+                    value={item.description ?? ''}
+                    rows={1}
+                    maxLength={400}
+                    placeholder="Описание предмета..."
+                    aria-label="Описание предмета"
+                    onChange={(e) =>
+                      updateInventoryItem(item.id, { description: e.target.value })
+                    }
+                    className="w-full resize-y rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-xs leading-snug text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_55%,transparent)] transition-all"
+                  />
+                </div>
+              ))}
+            </section>
+
+            {/* Right Column: Spells */}
+            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--line)] pb-2.5">
+                <div className="flex items-baseline gap-2">
+                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                    ЗАКЛИНАНИЯ
+                  </h2>
+                  <span className="text-[11px] font-serif text-[var(--muted)]">
+                    {knownSlugs.length > 0 ? `Всего: ${knownSlugs.length}` : '0'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsSpellModalOpen(true)}
+                  aria-label="Добавить заклинание из справочника"
+                  title="Добавить заклинание из справочника"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-xs font-medium tracking-wide transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Добавить</span>
+                </button>
+              </div>
+
+              {/* Character's added spells list */}
+              {knownSlugs.length === 0 ? (
+                <div className="py-12 px-4 text-center rounded-xl bg-[var(--paper)]/50 border border-dashed border-[var(--line)] flex flex-col items-center justify-center space-y-2">
+                  <Sparkles className="w-6 h-6 text-[var(--muted)]" />
+                  <p className="font-serif text-sm text-[var(--muted)]">
+                    Заклинания пока не добавлены
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setIsSpellModalOpen(true)}
+                    className="text-xs text-[var(--ink)] underline hover:text-[var(--muted)] cursor-pointer"
+                  >
+                    Нажмите здесь, чтобы выбрать из справочника
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((lvl) => {
+                    const spellsAtLevel = characterSpellsByLevel[lvl];
+                    if (!spellsAtLevel || spellsAtLevel.length === 0) return null;
+
+                    return (
+                      <div key={lvl} className="space-y-1.5">
+                        {/* Circle Header */}
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[10px] uppercase tracking-[0.15em] font-semibold text-[var(--muted)]">
+                            {SPELL_LEVEL_LABELS[lvl]}
+                          </span>
+                          <span className="text-[10px] text-[var(--muted)]">
+                            {spellsAtLevel.length}
+                          </span>
+                        </div>
+
+                        {/* List of spells in this circle */}
+                        <div className="space-y-1.5">
+                          {spellsAtLevel.map((spell) => {
+                            const meta = spell.metadata as
+                              | {
+                                  school?: string;
+                                  castingTime?: string;
+                                  range?: string;
+                                  components?: string;
+                                  duration?: string;
+                                  concentration?: boolean;
+                                  ritual?: boolean;
+                                  classes?: string[];
+                                  ruName?: string;
+                                  enName?: string;
+                                }
+                              | undefined;
+                            const isExpanded = expandedSpellSlugs.has(spell.slug);
+                            const isPrepared = preparedSlugs.includes(spell.slug);
+
+                            return (
+                              <div
+                                key={spell.slug}
+                                className="bg-[var(--paper)] rounded-xl px-3 py-2 space-y-2 transition-all border border-transparent hover:border-[var(--line)]"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    {/* Preparation toggle circle for leveled spells */}
+                                    {lvl > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => togglePreparedSpell(spell.slug)}
+                                        title={
+                                          isPrepared
+                                            ? 'Заклинание подготовлено'
+                                            : 'Заклинание не подготовлено'
+                                        }
+                                        aria-label={
+                                          isPrepared
+                                            ? 'Снять подготовку заклинания'
+                                            : 'Подготовить заклинание'
+                                        }
+                                        className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
+                                          isPrepared
+                                            ? 'bg-[var(--ink)] border-[var(--ink)] text-[var(--paper)]'
+                                            : 'border-[var(--muted)]/60 hover:border-[var(--ink)]'
+                                        }`}
+                                      >
+                                        {isPrepared && <Check className="w-2.5 h-2.5" />}
+                                      </button>
+                                    )}
+
+                                    <div className="min-w-0">
+                                      <div className="flex items-baseline gap-1.5 flex-wrap">
+                                        <span className="font-serif text-sm font-medium text-[var(--ink)] leading-snug">
+                                          {meta?.ruName || spell.title}
+                                        </span>
+                                        {meta?.enName && (
+                                          <span className="text-xs font-serif italic text-[var(--muted)]">
+                                            ({meta.enName})
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Badges & actions */}
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    {meta?.school && (
+                                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-[var(--card)] text-[var(--muted)]">
+                                        {meta.school}
+                                      </span>
+                                    )}
+                                    {meta?.concentration && (
+                                      <span
+                                        title="Концентрация"
+                                        className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                                      >
+                                        К
+                                      </span>
+                                    )}
+                                    {meta?.ritual && (
+                                      <span
+                                        title="Ритуал"
+                                        className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-700 dark:text-blue-300"
+                                      >
+                                        Р
+                                      </span>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleSpellExpanded(spell.slug)}
+                                      aria-label="Подробнее"
+                                      className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--ink)] flex items-center justify-center cursor-pointer transition-colors"
+                                    >
+                                      {isExpanded ? (
+                                        <ChevronUp className="w-3.5 h-3.5" />
+                                      ) : (
+                                        <ChevronDown className="w-3.5 h-3.5" />
+                                      )}
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => removeSpellFromCharacter(spell.slug)}
+                                      aria-label={`Удалить ${spell.title}`}
+                                      className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm flex items-center justify-center cursor-pointer transition-colors"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Meta line */}
+                                <div className="flex items-center gap-2 text-[11px] text-[var(--muted)] font-serif flex-wrap">
+                                  {meta?.castingTime && <span>{meta.castingTime}</span>}
+                                  {meta?.range && <span>• {meta.range}</span>}
+                                  {meta?.duration && <span>• {meta.duration}</span>}
+                                </div>
+
+                                {/* Expanded text */}
+                                {isExpanded && (
+                                  <div className="pt-2 border-t border-[var(--line)]/50 text-xs space-y-1.5 text-[var(--ink)]">
+                                    {meta?.components && (
+                                      <p className="text-[11px] text-[var(--muted)]">
+                                        <span className="font-semibold text-[var(--ink)]">
+                                          Компоненты:
+                                        </span>{' '}
+                                        {meta.components}
+                                      </p>
+                                    )}
+                                    {meta?.classes && meta.classes.length > 0 && (
+                                      <p className="text-[11px] text-[var(--muted)]">
+                                        <span className="font-semibold text-[var(--ink)]">
+                                          Классы:
+                                        </span>{' '}
+                                        {meta.classes.join(', ')}
+                                      </p>
+                                    )}
+                                    {spell.raw_content && (
+                                      <div className="whitespace-pre-wrap leading-relaxed font-serif text-xs opacity-90 pt-1">
+                                        {spell.raw_content}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </main>
+        )}
+
+        {/* =================================================================== */}
+        {/* OBSIDIAN LIBRARY WORKSPACE                                          */}
+        {/* =================================================================== */}
+        {activeDockTab === 'compendium' && (
+          <main className="space-y-4">
+            <section className="bg-[var(--card)] rounded-2xl p-4 sm:p-6 space-y-4">
+              {/* Header Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--line)] pb-4">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase tracking-[0.2em] text-[var(--muted)] font-medium">
+                      Библиотека кампании
+                    </span>
+                    <span className="text-[10px] bg-[var(--paper)] px-2 py-0.5 rounded-full font-semibold text-[var(--ink)] tabular-nums">
+                      {vaultTotalFiles} документов .md
+                    </span>
+                  </div>
+                  <h2 className="font-serif text-2xl md:text-3xl font-semibold text-[var(--ink)]">
+                    Справочник Obsidian
+                  </h2>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => void syncVaultWithGit()}
+                    disabled={isVaultSyncing}
+                    title="Подтянуть свежие изменения из репозитория GitHub"
+                    className="rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] px-3.5 py-1.5 text-xs font-medium inline-flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isVaultSyncing ? 'animate-spin' : ''}`}
+                    />
+                    <span>
+                      {isVaultSyncing ? 'Синхронизация...' : 'Синхронизировать'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsSpellModalOpen(true)}
+                    className="rounded-full bg-[var(--ink)] text-[var(--paper)] px-4 py-1.5 text-xs font-medium inline-flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer shadow-xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Фильтр заклинаний</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 2-Column Explorer: Left Tree, Right Reader */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                {/* Left Column: Folder & File Explorer (4 cols) */}
+                <div className="lg:col-span-4 bg-[var(--paper)]/60 rounded-2xl p-3 border border-[var(--line)] flex flex-col space-y-2.5 max-h-[75vh]">
+                  {/* Search Bar */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[var(--muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={vaultSearchQuery}
+                      onChange={(e) => setVaultSearchQuery(e.target.value)}
+                      placeholder="Поиск по документам..."
+                      className="w-full bg-[var(--card)] rounded-xl pl-8 pr-7 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--muted)] border border-[var(--line)] outline-none focus:border-[var(--ink)] transition-colors"
+                    />
+                    {vaultSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setVaultSearchQuery('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[var(--muted)] hover:text-[var(--ink)] cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Actions Row */}
+                  <div className="flex items-center justify-between text-[11px] text-[var(--muted)] px-1">
+                    <span>
+                      {vaultSearchQuery ? 'Найдено' : 'Структура'}:{' '}
+                      {filteredVaultTree.length} папок/файлов
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={expandAllVaultFolders}
+                        className="hover:text-[var(--ink)] underline cursor-pointer"
+                      >
+                        Развернуть всё
+                      </button>
+                      <span>•</span>
+                      <button
+                        type="button"
+                        onClick={collapseAllVaultFolders}
+                        className="hover:text-[var(--ink)] underline cursor-pointer"
+                      >
+                        Свернуть
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Scrollable Tree */}
+                  <div className="flex-1 overflow-y-auto space-y-0.5 pr-1 scrollbar-thin">
+                    {isVaultLoading ? (
+                      <div className="py-12 text-center text-xs text-[var(--muted)] flex items-center justify-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin text-[var(--sage)]" />
+                        <span>Чтение хранилища...</span>
+                      </div>
+                    ) : filteredVaultTree.length === 0 ? (
+                      <div className="py-8 text-center text-xs text-[var(--muted)] font-serif">
+                        {vaultSearchQuery
+                          ? 'Документы по запросу не найдены'
+                          : 'Хранилище пусто'}
+                      </div>
+                    ) : (
+                      filteredVaultTree.map((node) => renderVaultTreeNode(node))
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Column: Document Viewer (8 cols) */}
+                <div className="lg:col-span-8 bg-[var(--paper)]/40 rounded-2xl p-5 md:p-7 border border-[var(--line)] flex flex-col min-h-[550px]">
+                  {isVaultFileLoading ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center py-20 space-y-2">
+                      <Loader2 className="w-7 h-7 animate-spin text-[var(--sage)]" />
+                      <p className="font-serif italic text-sm text-[var(--muted)]">
+                        Загрузка документа...
+                      </p>
+                    </div>
+                  ) : selectedVaultFile ? (
+                    <div className="space-y-4">
+                      {/* Top Bar: Breadcrumbs & Actions */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] pb-3">
+                        <div className="flex items-center gap-1.5 text-xs text-[var(--muted)] flex-wrap">
+                          {selectedVaultFile.path
+                            .split('/')
+                            .map((part, idx, arr) => (
+                              <React.Fragment key={idx}>
+                                {idx > 0 && <span className="opacity-40">/</span>}
+                                <span
+                                  className={
+                                    idx === arr.length - 1
+                                      ? 'text-[var(--ink)] font-semibold'
+                                      : 'hover:text-[var(--ink)] cursor-pointer'
+                                  }
+                                  onClick={() => {
+                                    if (idx < arr.length - 1) {
+                                      const folderPath = arr
+                                        .slice(0, idx + 1)
+                                        .join('/');
+                                      toggleVaultFolder(folderPath);
+                                    }
+                                  }}
+                                >
+                                  {part.replace(/\.md$/i, '')}
+                                </span>
+                              </React.Fragment>
+                            ))}
+                        </div>
+
+                        {matchingSpellForSelectedVaultFile && activeCharacter && (
+                          <div>
+                            {knownSlugs.includes(
+                              matchingSpellForSelectedVaultFile.slug
+                            ) ? (
+                              <span className="px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 text-xs font-medium inline-flex items-center gap-1.5">
+                                <Check className="w-3.5 h-3.5" />
+                                <span>В книге заклинаний</span>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  addSpellToCharacter(
+                                    matchingSpellForSelectedVaultFile.slug
+                                  )
+                                }
+                                className="px-3 py-1 rounded-full bg-[var(--ink)] text-[var(--paper)] text-xs font-medium inline-flex items-center gap-1.5 hover:opacity-90 transition-opacity cursor-pointer shadow-xs"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Добавить персонажу</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Document Title */}
+                      <h1 className="font-serif text-2xl md:text-3xl font-bold text-[var(--ink)] leading-tight">
+                        {selectedVaultFile.title}
+                      </h1>
+
+                      {/* Rendered Markdown Body */}
+                      <div
+                        className="markdown-body overflow-y-auto max-h-[65vh] pr-2 scrollbar-thin"
+                        onClick={handleMarkdownClick}
+                        dangerouslySetInnerHTML={{
+                          __html: renderMarkdown(selectedVaultFile.content),
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    /* Welcome View when no file is chosen */
+                    <div className="flex-1 flex flex-col items-center justify-center text-center py-10 px-4 space-y-6 max-w-xl mx-auto">
+                      <div className="space-y-2">
+                        <div className="w-12 h-12 rounded-full bg-[var(--card)] text-[var(--sage)] flex items-center justify-center mx-auto shadow-xs">
+                          <BookOpen className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-serif text-2xl font-semibold text-[var(--ink)]">
+                          Библиотека кампании D&amp;D 5.5e
+                        </h3>
+                        <p className="font-serif italic text-sm text-[var(--muted)]">
+                          Все материалы, правила, виды, заклинания и черты из вашего репозитория Obsidian собраны здесь.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full text-left">
+                        <div
+                          onClick={() => {
+                            toggleVaultFolder('Справочник/Виды');
+                            void loadVaultFile(
+                              'Справочник/Виды D&D 2024 (Species Overview).md'
+                            );
+                          }}
+                          className="bg-[var(--card)] hover:ring-1 hover:ring-[var(--ink)] p-3.5 rounded-2xl cursor-pointer transition-all space-y-1"
+                        >
+                          <div className="flex items-center gap-2 font-serif font-semibold text-[var(--ink)] text-sm">
+                            <span className="text-[var(--ochre)]">◈</span>
+                            <span>Виды (Species)</span>
+                          </div>
+                          <p className="text-xs text-[var(--muted)]">
+                            10 видов D&amp;D 2024 (Аасимар, Эльф, Дварф, Человек...)
+                          </p>
+                        </div>
+
+                        <div
+                          onClick={() => {
+                            toggleVaultFolder('Справочник/Заклинания');
+                            void loadVaultFile(
+                              'Справочник/Справочник D&D 5.5e (Compendium).md'
+                            );
+                          }}
+                          className="bg-[var(--card)] hover:ring-1 hover:ring-[var(--ink)] p-3.5 rounded-2xl cursor-pointer transition-all space-y-1"
+                        >
+                          <div className="flex items-center gap-2 font-serif font-semibold text-[var(--ink)] text-sm">
+                            <span className="text-[var(--sage)]">◈</span>
+                            <span>Заклинания (Spells)</span>
+                          </div>
+                          <p className="text-xs text-[var(--muted)]">
+                            399 заклинаний по кругам (0–9) и классам
+                          </p>
+                        </div>
+
+                        <div
+                          onClick={() => {
+                            toggleVaultFolder('Справочник/Правила');
+                            void loadVaultFile(
+                              'Справочник/Правила/Сводка правил D&D 5.5e (Rules Overview).md'
+                            );
+                          }}
+                          className="bg-[var(--card)] hover:ring-1 hover:ring-[var(--ink)] p-3.5 rounded-2xl cursor-pointer transition-all space-y-1"
+                        >
+                          <div className="flex items-center gap-2 font-serif font-semibold text-[var(--ink)] text-sm">
+                            <span className="text-[var(--sea)]">◈</span>
+                            <span>Правила (Rules)</span>
+                          </div>
+                          <p className="text-xs text-[var(--muted)]">
+                            Действия, мастерство оружия, состояния, хоумбрю
+                          </p>
+                        </div>
+
+                        <div
+                          onClick={() => {
+                            toggleVaultFolder('Справочник/Черты');
+                            void loadVaultFile(
+                              'Справочник/Черты D&D 2024 (Feats Overview).md'
+                            );
+                          }}
+                          className="bg-[var(--card)] hover:ring-1 hover:ring-[var(--ink)] p-3.5 rounded-2xl cursor-pointer transition-all space-y-1"
+                        >
+                          <div className="flex items-center gap-2 font-serif font-semibold text-[var(--ink)] text-sm">
+                            <span className="text-[var(--clay)]">◈</span>
+                            <span>Черты (Feats)</span>
+                          </div>
+                          <p className="text-xs text-[var(--muted)]">
+                            62 черты для персонажей редакции 2024
+                          </p>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-[var(--muted)]">
+                        Выберите любой документ в дереве слева для чтения
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          </main>
+        )}
+
+        {/* =================================================================== */}
+        {/* MODAL: ADD SPELL FROM COMPENDIUM                                    */}
+        {/* =================================================================== */}
+        {isSpellModalOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 md:p-6"
+            onClick={() => setIsSpellModalOpen(false)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="bg-[var(--card)] text-[var(--ink)] w-full max-w-3xl max-h-[90vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden border border-[var(--line)]"
+            >
+              {/* Modal Header */}
+              <div className="px-5 py-4 border-b border-[var(--line)] flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-serif text-xl font-semibold text-[var(--ink)]">
+                    Справочник заклинаний
+                  </h2>
+                  <p className="text-xs text-[var(--muted)]">
+                    D&amp;D 5.5e (2024) • {compendiumSpells.length} заклинаний в базе Obsidian
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsSpellModalOpen(false)}
+                  aria-label="Закрыть окно заклинаний"
+                  className="w-8 h-8 rounded-full bg-[var(--paper)] text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[var(--line)] flex items-center justify-center cursor-pointer transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Filter Toolbar */}
+              <div className="p-4 border-b border-[var(--line)] bg-[var(--paper)]/50 space-y-3">
+                {/* Search Input */}
+                <div className="relative">
+                  <Search className="w-4 h-4 text-[var(--muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={spellSearchQuery}
+                    onChange={(e) => setSpellSearchQuery(e.target.value)}
+                    placeholder="Поиск по названию (рус/англ) или описанию..."
+                    aria-label="Поиск заклинания"
+                    className="w-full bg-[var(--card)] rounded-xl pl-9 pr-8 py-2 text-xs text-[var(--ink)] placeholder:text-[var(--muted)] border border-[var(--line)] outline-none focus:border-[var(--ink)] transition-colors"
+                  />
+                  {spellSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSpellSearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-[var(--muted)] hover:text-[var(--ink)] cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+
+                {/* Level Pills */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+                  <button
+                    type="button"
+                    onClick={() => setSpellLevelFilter('all')}
+                    className={`px-2.5 py-1 rounded-full text-xs font-medium cursor-pointer transition-colors shrink-0 ${
+                      spellLevelFilter === 'all'
+                        ? 'bg-[var(--ink)] text-[var(--paper)]'
+                        : 'bg-[var(--card)] text-[var(--muted)] hover:text-[var(--ink)] border border-[var(--line)]'
+                    }`}
+                  >
+                    Все круги
+                  </button>
+                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      onClick={() => setSpellLevelFilter(lvl)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-medium cursor-pointer transition-colors shrink-0 ${
+                        spellLevelFilter === lvl
+                          ? 'bg-[var(--ink)] text-[var(--paper)]'
+                          : 'bg-[var(--card)] text-[var(--muted)] hover:text-[var(--ink)] border border-[var(--line)]'
+                      }`}
+                    >
+                      {lvl === 0 ? 'Заговоры' : `${lvl} круг`}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Dropdowns & Toggles Row */}
+                <div className="flex items-center gap-2 flex-wrap text-xs">
+                  {/* Class Select */}
+                  <select
+                    value={spellClassFilter}
+                    onChange={(e) => setSpellClassFilter(e.target.value)}
+                    className="bg-[var(--card)] text-[var(--ink)] px-2.5 py-1.5 rounded-xl border border-[var(--line)] outline-none cursor-pointer"
+                  >
+                    <option value="all">Все классы</option>
+                    {SPELL_CLASSES.map((cls) => (
+                      <option key={cls} value={cls}>
+                        {cls}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* School Select */}
+                  <select
+                    value={spellSchoolFilter}
+                    onChange={(e) => setSpellSchoolFilter(e.target.value)}
+                    className="bg-[var(--card)] text-[var(--ink)] px-2.5 py-1.5 rounded-xl border border-[var(--line)] outline-none cursor-pointer"
+                  >
+                    <option value="all">Все школы</option>
+                    {SPELL_SCHOOLS.map((sch) => (
+                      <option key={sch} value={sch}>
+                        {sch}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Concentration Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setSpellConcentrationFilter((p) => !p)}
+                    className={`px-2.5 py-1.5 rounded-xl border cursor-pointer transition-colors font-medium ${
+                      spellConcentrationFilter
+                        ? 'bg-amber-500 text-white border-amber-500'
+                        : 'bg-[var(--card)] text-[var(--muted)] border-[var(--line)] hover:text-[var(--ink)]'
+                    }`}
+                  >
+                    Концентрация
+                  </button>
+
+                  {/* Ritual Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setSpellRitualFilter((p) => !p)}
+                    className={`px-2.5 py-1.5 rounded-xl border cursor-pointer transition-colors font-medium ${
+                      spellRitualFilter
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-[var(--card)] text-[var(--muted)] border-[var(--line)] hover:text-[var(--ink)]'
+                    }`}
+                  >
+                    Ритуал
+                  </button>
+
+                  {/* Reset Filters */}
+                  {(spellSearchQuery ||
+                    spellLevelFilter !== 'all' ||
+                    spellClassFilter !== 'all' ||
+                    spellSchoolFilter !== 'all' ||
+                    spellConcentrationFilter ||
+                    spellRitualFilter) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSpellSearchQuery('');
+                        setSpellLevelFilter('all');
+                        setSpellClassFilter('all');
+                        setSpellSchoolFilter('all');
+                        setSpellConcentrationFilter(false);
+                        setSpellRitualFilter(false);
+                      }}
+                      className="text-xs text-[var(--muted)] hover:text-[var(--ink)] underline cursor-pointer ml-auto"
+                    >
+                      Сбросить фильтры
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Results Count Header */}
+              <div className="px-5 py-2 bg-[var(--card)] border-b border-[var(--line)] flex items-center justify-between text-xs text-[var(--muted)]">
+                <span>Найдено заклинаний: {filteredCompendiumSpells.length}</span>
+                <span>Добавлено персонажу: {knownSlugs.length}</span>
+              </div>
+
+              {/* Spell Results List */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+                {filteredCompendiumSpells.length === 0 ? (
+                  <div className="text-center py-12 text-[var(--muted)] font-serif text-sm">
+                    Заклинания по заданным фильтрам не найдены
+                  </div>
+                ) : (
+                  filteredCompendiumSpells.map((spell) => {
+                    const meta = spell.metadata as
+                      | {
+                          spellLevel?: number;
+                          school?: string;
+                          castingTime?: string;
+                          range?: string;
+                          components?: string;
+                          duration?: string;
+                          concentration?: boolean;
+                          ritual?: boolean;
+                          classes?: string[];
+                          ruName?: string;
+                          enName?: string;
+                        }
+                      | undefined;
+                    const isKnown = knownSlugs.includes(spell.slug);
+                    const isExpanded = expandedSpellSlugs.has(spell.slug);
+
+                    return (
+                      <div
+                        key={spell.slug}
+                        className="bg-[var(--paper)] rounded-2xl p-3.5 space-y-2 border border-transparent hover:border-[var(--line)] transition-all"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-1 min-w-0 flex-1">
+                            <div className="flex items-baseline gap-2 flex-wrap">
+                              <h3 className="font-serif text-base font-semibold text-[var(--ink)]">
+                                {meta?.ruName || spell.title}
+                              </h3>
+                              {meta?.enName && (
+                                <span className="text-xs font-serif italic text-[var(--muted)]">
+                                  ({meta.enName})
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Badges */}
+                            <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+                              <span className="px-2 py-0.5 rounded-full bg-[var(--card)] font-medium text-[var(--ink)]">
+                                {meta?.spellLevel === 0 ? 'Заговор' : `${meta?.spellLevel} круг`}
+                              </span>
+                              {meta?.school && (
+                                <span className="px-2 py-0.5 rounded-full bg-[var(--card)] text-[var(--muted)]">
+                                  {meta.school}
+                                </span>
+                              )}
+                              {meta?.concentration && (
+                                <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 font-medium">
+                                  Концентрация
+                                </span>
+                              )}
+                              {meta?.ritual && (
+                                <span className="px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-700 dark:text-blue-300 font-medium">
+                                  Ритуал
+                                </span>
+                              )}
+                              {meta?.castingTime && (
+                                <span className="text-[var(--muted)]">
+                                  • {meta.castingTime}
+                                </span>
+                              )}
+                              {meta?.range && (
+                                <span className="text-[var(--muted)]">
+                                  • {meta.range}
+                                </span>
+                              )}
+                            </div>
+
+                            {meta?.classes && meta.classes.length > 0 && (
+                              <p className="text-[11px] text-[var(--muted)] font-serif">
+                                Классы: {meta.classes.join(', ')}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Add / Added Button */}
+                          <div className="shrink-0 flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => toggleSpellExpanded(spell.slug)}
+                              aria-label="Подробнее"
+                              className="p-1.5 rounded-full text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                            >
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4" />
+                              )}
+                            </button>
+
+                            {isKnown ? (
+                              <button
+                                type="button"
+                                onClick={() => removeSpellFromCharacter(spell.slug)}
+                                title="Нажмите, чтобы удалить из книги"
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 hover:bg-rose-500/15 hover:text-rose-600 text-xs font-medium transition-colors cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Добавлено</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => addSpellToCharacter(spell.slug)}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-[var(--ink)] text-[var(--paper)] hover:opacity-90 text-xs font-medium transition-opacity cursor-pointer shadow-xs"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Добавить</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Expanded details */}
+                        {isExpanded && (
+                          <div className="pt-2 border-t border-[var(--line)]/60 text-xs space-y-2 text-[var(--ink)]">
+                            <div className="grid grid-cols-2 gap-2 text-[11px] bg-[var(--card)] p-2.5 rounded-xl text-[var(--muted)]">
+                              <div>
+                                <strong className="text-[var(--ink)]">Время:</strong>{' '}
+                                {meta?.castingTime || '—'}
+                              </div>
+                              <div>
+                                <strong className="text-[var(--ink)]">Дистанция:</strong>{' '}
+                                {meta?.range || '—'}
+                              </div>
+                              <div>
+                                <strong className="text-[var(--ink)]">Длительность:</strong>{' '}
+                                {meta?.duration || '—'}
+                              </div>
+                              <div>
+                                <strong className="text-[var(--ink)]">Компоненты:</strong>{' '}
+                                {meta?.components || '—'}
+                              </div>
+                            </div>
+                            {spell.raw_content && (
+                              <div className="whitespace-pre-wrap leading-relaxed font-serif text-xs opacity-90 pt-1">
+                                {spell.raw_content}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-
-      {/* ===================================================================== */}
-      {/* FLOATING BOTTOM INK DOCK                                              */}
-      {/* ===================================================================== */}
-      <nav
-        aria-label="Режимы листа персонажа"
-        className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40"
-      >
-        <div className="bg-[var(--ink)] text-[var(--paper)] rounded-full px-2.5 py-1.5 shadow-lg flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setActiveDockTab('sheet')}
-            className={`rounded-full px-3.5 py-1.5 text-[11px] uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-              activeDockTab === 'sheet'
-                ? 'bg-[var(--paper)] text-[var(--ink)]'
-                : 'text-[color-mix(in_srgb,var(--paper)_75%,transparent)] hover:text-[var(--paper)]'
-            }`}
-          >
-            <ScrollText className="w-3.5 h-3.5" />
-            <span>Основной лист</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveDockTab('inventory')}
-            className={`rounded-full px-3.5 py-1.5 text-[11px] uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-              activeDockTab === 'inventory'
-                ? 'bg-[var(--paper)] text-[var(--ink)]'
-                : 'text-[color-mix(in_srgb,var(--paper)_75%,transparent)] hover:text-[var(--paper)]'
-            }`}
-          >
-            <Feather className="w-3.5 h-3.5 text-[var(--ochre)]" />
-            <span>Инвентарь и Заклинания</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveDockTab('compendium')}
-            className={`rounded-full px-3.5 py-1.5 text-[11px] uppercase tracking-wider font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-              activeDockTab === 'compendium'
-                ? 'bg-[var(--paper)] text-[var(--ink)]'
-                : 'text-[color-mix(in_srgb,var(--paper)_75%,transparent)] hover:text-[var(--paper)]'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5 text-[var(--sage)]" />
-            <span className="hidden sm:inline">Справочник Obsidian &amp; dnd.su</span>
-            <span className="sm:hidden">Справочник</span>
-          </button>
-        </div>
-      </nav>
     </div>
   );
 }

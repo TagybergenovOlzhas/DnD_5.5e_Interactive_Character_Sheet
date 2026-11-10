@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+drizzle
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.git
+.env
+.DS_Store
+npm-debug.log*

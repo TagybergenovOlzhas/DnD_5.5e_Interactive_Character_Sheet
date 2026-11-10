@@ -1,0 +1,17 @@
+services:
+  dnd-sheet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dnd-55e-sheet
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=/app/data/dnd.sqlite
+      - VAULT_DIR=/app/data/vault
+    mem_limit: 150m
