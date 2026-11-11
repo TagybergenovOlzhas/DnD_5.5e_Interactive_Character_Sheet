@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import type {
+  BagOfHolding,
+  CharacterCurrency,
   CharacterHp,
+  CharacterNote,
   CharacterProficiencies,
   CharacterSpells,
   CharacterStats,
   CompendiumCategory,
   CompendiumMetadata,
   CompendiumSource,
+  CreatureSize,
   CustomResource,
   InventoryItem,
+  PassiveTrait,
   WeaponAttack,
 } from '../../shared/types.js';
 
@@ -60,6 +65,7 @@ export const characters = sqliteTable('characters', {
   species: text('species').notNull(),
   class_name: text('class_name').notNull(),
   subclass_name: text('subclass_name'),
+  size: text('size').$type<CreatureSize>().notNull().default('medium'),
   stats: text('stats', { mode: 'json' })
     .$type<CharacterStats>()
     .notNull()
@@ -85,6 +91,8 @@ export const characters = sqliteTable('characters', {
       armor: [],
       tools: [],
       languages: ['Common'],
+      customProficiencies: [],
+      heavyArmorStealthDisadvantage: false,
     })),
   hp: text('hp', { mode: 'json' })
     .$type<CharacterHp>()
@@ -107,10 +115,22 @@ export const characters = sqliteTable('characters', {
     .$type<CustomResource[]>()
     .notNull()
     .$defaultFn(() => []),
+  passive_traits: text('passive_traits', { mode: 'json' })
+    .$type<PassiveTrait[]>()
+    .notNull()
+    .$defaultFn(() => []),
   inventory: text('inventory', { mode: 'json' })
     .$type<InventoryItem[]>()
     .notNull()
     .$defaultFn(() => []),
+  bag_of_holding: text('bag_of_holding', { mode: 'json' })
+    .$type<BagOfHolding>()
+    .notNull()
+    .$defaultFn(() => ({ enabled: false, items: [] })),
+  currency: text('currency', { mode: 'json' })
+    .$type<CharacterCurrency>()
+    .notNull()
+    .$defaultFn(() => ({ pp: 0, gp: 0, sp: 0, cp: 0 })),
   weapon_attacks: text('weapon_attacks', { mode: 'json' })
     .$type<WeaponAttack[]>()
     .notNull()
@@ -126,6 +146,10 @@ export const characters = sqliteTable('characters', {
       knownSlugs: [],
     })),
   notes: text('notes').notNull().default(''),
+  note_cards: text('note_cards', { mode: 'json' })
+    .$type<CharacterNote[]>()
+    .notNull()
+    .$defaultFn(() => []),
   updated_at: integer('updated_at', { mode: 'timestamp' })
     .notNull()
     .$defaultFn(() => new Date()),

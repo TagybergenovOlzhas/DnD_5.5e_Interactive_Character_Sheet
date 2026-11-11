@@ -50,15 +50,20 @@ export function ensureDatabaseInitialized(): void {
       species TEXT NOT NULL,
       class_name TEXT NOT NULL,
       subclass_name TEXT,
+      size TEXT NOT NULL DEFAULT 'medium',
       stats TEXT NOT NULL,
       proficiencies TEXT NOT NULL,
       hp TEXT NOT NULL,
       exhaustion INTEGER NOT NULL DEFAULT 0,
       custom_resources TEXT NOT NULL DEFAULT '[]',
+      passive_traits TEXT NOT NULL DEFAULT '[]',
       inventory TEXT NOT NULL DEFAULT '[]',
+      bag_of_holding TEXT NOT NULL DEFAULT '{"enabled":false,"items":[]}',
+      currency TEXT NOT NULL DEFAULT '{"pp":0,"gp":0,"sp":0,"cp":0}',
       spells TEXT NOT NULL,
       weapon_attacks TEXT NOT NULL DEFAULT '[]',
       notes TEXT NOT NULL DEFAULT '',
+      note_cards TEXT NOT NULL DEFAULT '[]',
       updated_at INTEGER NOT NULL
     );
   `);
@@ -67,6 +72,31 @@ export function ensureDatabaseInitialized(): void {
   if (!columns.some((column) => column.name === 'weapon_attacks')) {
     sqlite.exec(
       "ALTER TABLE characters ADD COLUMN weapon_attacks TEXT NOT NULL DEFAULT '[]'"
+    );
+  }
+  if (!columns.some((column) => column.name === 'passive_traits')) {
+    sqlite.exec(
+      "ALTER TABLE characters ADD COLUMN passive_traits TEXT NOT NULL DEFAULT '[]'"
+    );
+  }
+  if (!columns.some((column) => column.name === 'currency')) {
+    sqlite.exec(
+      `ALTER TABLE characters ADD COLUMN currency TEXT NOT NULL DEFAULT '{"pp":0,"gp":0,"sp":0,"cp":0}'`
+    );
+  }
+  if (!columns.some((column) => column.name === 'size')) {
+    sqlite.exec(
+      "ALTER TABLE characters ADD COLUMN size TEXT NOT NULL DEFAULT 'medium'"
+    );
+  }
+  if (!columns.some((column) => column.name === 'bag_of_holding')) {
+    sqlite.exec(
+      `ALTER TABLE characters ADD COLUMN bag_of_holding TEXT NOT NULL DEFAULT '{"enabled":false,"items":[]}'`
+    );
+  }
+  if (!columns.some((column) => column.name === 'note_cards')) {
+    sqlite.exec(
+      "ALTER TABLE characters ADD COLUMN note_cards TEXT NOT NULL DEFAULT '[]'"
     );
   }
 }

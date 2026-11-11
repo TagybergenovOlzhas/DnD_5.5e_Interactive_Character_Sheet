@@ -1,10 +1,14 @@
 import type {
   AbilityKey,
+  CharacterCurrency,
   CharacterStats,
   CompendiumCategory,
   CompendiumEntry,
+  CreatureSize,
+  CurrencyCode,
   ProficiencyRank,
   WeaponMasteryProperty,
+  WeightUnit,
 } from './types.js';
 
 /**
@@ -374,3 +378,176 @@ export const WEAPON_MASTERY_DESCRIPTIONS: Record<WeaponMasteryProperty, string> 
   Vex:
     'При попадании и нанесении урона вы получаете Преимущество на следующий бросок атаки по этой цели до конца вашего следующего хода.',
 };
+
+/**
+ * Currency conversion rates in copper pieces (10 cp = 1 sp, 10 sp = 1 gp, 10 gp = 1 pp).
+ */
+export const CURRENCY_RATES_IN_COPPER: Record<CurrencyCode, number> = {
+  pp: 1000,
+  gp: 100,
+  sp: 10,
+  cp: 1,
+};
+
+/**
+ * Computes total wealth in copper pieces across all four coin denominations.
+ */
+export function currencyToCopper(currency: CharacterCurrency): number {
+  return (
+    Math.max(0, Math.floor(currency.pp)) * CURRENCY_RATES_IN_COPPER.pp +
+    Math.max(0, Math.floor(currency.gp)) * CURRENCY_RATES_IN_COPPER.gp +
+    Math.max(0, Math.floor(currency.sp)) * CURRENCY_RATES_IN_COPPER.sp +
+    Math.max(0, Math.floor(currency.cp)) * CURRENCY_RATES_IN_COPPER.cp
+  );
+}
+
+/**
+ * Decomposes a non-negative total copper value into PP / GP / SP / CP (10:1 between tiers).
+ */
+export function copperToCurrency(totalCopper: number): CharacterCurrency {
+  const safe = Math.max(0, Math.floor(totalCopper));
+  const pp = Math.min(9999999, Math.floor(safe / CURRENCY_RATES_IN_COPPER.pp));
+  const afterPp = safe - pp * CURRENCY_RATES_IN_COPPER.pp;
+  const gp = Math.min(9999999, Math.floor(afterPp / CURRENCY_RATES_IN_COPPER.gp));
+  const afterGp = afterPp - gp * CURRENCY_RATES_IN_COPPER.gp;
+  const sp = Math.floor(afterGp / CURRENCY_RATES_IN_COPPER.sp);
+  const cp = afterGp - sp * CURRENCY_RATES_IN_COPPER.sp;
+  return { pp, gp, sp, cp };
+}
+
+/**
+ * Applies a currency deposit (`add`) or expense (`spend`) across denominations using 10:1 exchange rates.
+ */
+export function applyCurrencyTransaction(params: {
+  currency: CharacterCurrency;
+  coin: CurrencyCode;
+  amount: number;
+  mode: 'add' | 'spend';
+}):
+  | { ok: true; next: CharacterCurrency; totalCopper: number }
+  | { ok: false; availableCopper: number; requiredCopper: number } {
+  const safeAmount = Math.max(0, Math.floor(params.amount));
+  const availableCopper = currencyToCopper(params.currency);
+  const deltaCopper = safeAmount * CURRENCY_RATES_IN_COPPER[params.coin];
+
+  if (params.mode === 'spend') {
+    if (deltaCopper > availableCopper) {
+      return { ok: false, availableCopper, requiredCopper: deltaCopper };
+    }
+    const nextTotal = availableCopper - deltaCopper;
+    return { ok: true, next: copperToCurrency(nextTotal), totalCopper: nextTotal };
+  }
+
+  const nextTotal = availableCopper + deltaCopper;
+  return { ok: true, next: copperToCurrency(nextTotal), totalCopper: nextTotal };
+}
+
+/**
+ * D&D 5.5e (2024) Carrying Capacity multiplier per creature size category:
+ * Tiny ×7.5, Small/Medium ×15, Large ×30, Huge ×60, Gargantuan ×120.
+ */
+export const CREATURE_SIZE_CARRY_MULTIPLIER: Record<CreatureSize, number> = {
+  tiny: 7.5,
+  small: 15,
+  medium: 15,
+  large: 30,
+  huge: 60,
+  gargantuan: 120,
+};
+
+/**
+ * International conversion factor: 1 pound (lb) = 0.45359237 kilograms (kg).
+ */
+export const POUNDS_TO_KG = 0.45359237;
+
+/**
+ * Rounds weight cleanly to 1 decimal place and normalizes -0 to 0.
+ */
+export function roundWeight(pounds: number): number {
+  const rounded = Math.round(pounds * 10) / 10;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+/**
+ * Converts pounds (фт) to kilograms (кг), rounded to 1 decimal place.
+ */
+export function poundsToKg(pounds: number): number {
+  return roundWeight(pounds * POUNDS_TO_KG);
+}
+
+/**
+ * Converts kilograms (кг) to exact pounds (фт) without rounding.
+ */
+export function kgToPoundsRaw(kg: number): number {
+  return kg / POUNDS_TO_KG;
+}
+
+/**
+ * Converts kilograms (кг) to pounds (фт), rounded to 1 decimal place.
+ */
+export function kgToPounds(kg: number): number {
+  return roundWeight(kgToPoundsRaw(kg));
+}
+
+/**
+ * Converts a weight value between 'lb' (фт) and 'kg' (кг), rounded to 1 decimal place.
+ */
+export function convertWeight(
+  weight: number,
+  from: WeightUnit,
+  to: WeightUnit
+): number {
+  const safeWeight = Math.max(0, weight);
+  if (from === to) return roundWeight(safeWeight);
+  return from === 'kg' ? kgToPounds(safeWeight) : poundsToKg(safeWeight);
+}
+
+/**
+ * Converts an inventory item's per-unit weight to exact pounds for drift-free summation.
+ */
+export function itemWeightToPoundsRaw(
+  weight: number,
+  unit: WeightUnit = 'lb'
+): number {
+  const safeWeight = Math.max(0, weight);
+  return unit === 'kg' ? kgToPoundsRaw(safeWeight) : safeWeight;
+}
+
+/**
+ * Computes total carried weight in exact unrounded pounds across inventory items
+ * (accounting for each item's unit 'lb' or 'kg' and quantity).
+ */
+export function calculateInventoryTotalPoundsRaw(
+  items: ReadonlyArray<{
+    weight?: number;
+    weightUnit?: WeightUnit;
+    quantity?: number;
+  }>
+): number {
+  return items.reduce((acc, item) => {
+    const qty = Math.max(0, item.quantity ?? 1);
+    return acc + itemWeightToPoundsRaw(item.weight ?? 0, item.weightUnit ?? 'lb') * qty;
+  }, 0);
+}
+
+/**
+ * Calculates D&D 5.5e (2024) Carrying Capacity in pounds:
+ * Strength score × size multiplier.
+ */
+export function calculateCarryingCapacity(
+  strengthScore: number,
+  size: CreatureSize = 'medium'
+): number {
+  const safeStr = Math.max(0, Math.floor(strengthScore));
+  const multiplier = CREATURE_SIZE_CARRY_MULTIPLIER[size] ?? 15;
+  return roundWeight(safeStr * multiplier);
+}
+
+/**
+ * D&D 5.5e (2024 DMG) Bag of Holding capacities:
+ * - Holds up to 500 pounds inside a 64 cubic feet (2 ft square, 4 ft deep) extradimensional space.
+ * - The bag itself weighs 5 pounds regardless of its contents.
+ */
+export const BAG_OF_HOLDING_CAPACITY_POUNDS = 500;
+export const BAG_OF_HOLDING_SELF_WEIGHT_POUNDS = 5;
+export const BAG_OF_HOLDING_VOLUME_CUBIC_FEET = 64;

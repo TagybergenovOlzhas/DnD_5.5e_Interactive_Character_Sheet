@@ -1,19 +1,189 @@
 import { create } from 'zustand';
 import {
+  CreatureSizeSchema,
   type AbilityKey,
+  type BagOfHolding,
   type Character,
+  type CharacterCurrency,
   type CharacterHp,
+  type CharacterNote,
   type CharacterStats,
   type CompendiumEntry,
+  type CurrencyCode,
+  type CustomProficiencyEntry,
   type CustomResource,
   type InventoryItem,
+  type PassiveTrait,
   type ProficiencyRank,
   type SkillKey,
   type UpdateCharacterPatch,
   type VaultFileNode,
   type WeaponAttack,
 } from '@shared/types';
-import { hitDiceAfterLongRest, MAX_EXHAUSTION_LEVEL } from '@shared/rulesEngine';
+import {
+  applyCurrencyTransaction,
+  hitDiceAfterLongRest,
+  MAX_EXHAUSTION_LEVEL,
+} from '@shared/rulesEngine';
+
+function clampCoin(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(9999999, Math.floor(value)))
+    : 0;
+}
+
+function normalizeInventoryList(rawItems: unknown): InventoryItem[] {
+  if (!Array.isArray(rawItems)) return [];
+  return rawItems.map((raw, index) => {
+    const item = raw as Partial<InventoryItem> | undefined;
+    const chargesMax =
+      typeof item?.chargesMax === 'number'
+        ? Math.max(0, Math.min(30, Math.floor(item.chargesMax)))
+        : 0;
+    const rawChargesCurrent =
+      typeof item?.chargesCurrent === 'number'
+        ? Math.max(0, Math.floor(item.chargesCurrent))
+        : chargesMax;
+    return {
+      id: typeof item?.id === 'string' && item.id.trim() !== '' ? item.id : `item-${index}`,
+      compendium_slug: item?.compendium_slug,
+      name: typeof item?.name === 'string' ? item.name : '',
+      description: typeof item?.description === 'string' ? item.description : '',
+      quantity:
+        typeof item?.quantity === 'number'
+          ? Math.max(0, Math.min(9999, Math.floor(item.quantity)))
+          : 1,
+      equipped: Boolean(item?.equipped),
+      attuned: Boolean(item?.attuned),
+      weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
+      weightUnit: item?.weightUnit === 'kg' ? 'kg' : 'lb',
+      chargesMax,
+      chargesCurrent: Math.min(chargesMax, rawChargesCurrent),
+      overrides: item?.overrides,
+    };
+  });
+}
+
+function appendInventoryItem(
+  items: InventoryItem[],
+  item?: Partial<InventoryItem>
+): InventoryItem[] {
+  const chargesMax =
+    item?.chargesMax !== undefined
+      ? Math.max(0, Math.min(30, Math.floor(item.chargesMax)))
+      : 0;
+  const chargesCurrent =
+    item?.chargesCurrent !== undefined
+      ? Math.max(0, Math.min(chargesMax, Math.floor(item.chargesCurrent)))
+      : chargesMax;
+  return [
+    ...items,
+    {
+      id: item?.id ?? crypto.randomUUID(),
+      name: typeof item?.name === 'string' ? item.name : '',
+      description: typeof item?.description === 'string' ? item.description : '',
+      quantity:
+        typeof item?.quantity === 'number'
+          ? Math.max(0, Math.min(9999, Math.floor(item.quantity)))
+          : 1,
+      equipped: Boolean(item?.equipped),
+      attuned: Boolean(item?.attuned),
+      weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
+      weightUnit: item?.weightUnit === 'kg' ? 'kg' : 'lb',
+      chargesMax,
+      chargesCurrent,
+    },
+  ];
+}
+
+function patchInventoryItem(
+  items: InventoryItem[],
+  id: string,
+  patch: Partial<InventoryItem>
+): InventoryItem[] {
+  return items.map((item) => {
+    if (item.id !== id) return item;
+    const nextChargesMax =
+      patch.chargesMax !== undefined
+        ? Math.max(0, Math.min(30, Math.floor(patch.chargesMax)))
+        : item.chargesMax ?? 0;
+    const rawChargesCurrent =
+      patch.chargesCurrent !== undefined
+        ? Math.max(0, Math.floor(patch.chargesCurrent))
+        : item.chargesCurrent ?? 0;
+    return {
+      ...item,
+      ...patch,
+      quantity:
+        patch.quantity !== undefined
+          ? Math.max(0, Math.min(9999, Math.floor(patch.quantity)))
+          : item.quantity,
+      weight:
+        patch.weight !== undefined
+          ? Math.max(0, patch.weight)
+          : item.weight ?? 0,
+      weightUnit:
+        patch.weightUnit !== undefined
+          ? patch.weightUnit === 'kg'
+            ? 'kg'
+            : 'lb'
+          : item.weightUnit === 'kg'
+            ? 'kg'
+            : 'lb',
+      chargesMax: nextChargesMax,
+      chargesCurrent: Math.min(nextChargesMax, rawChargesCurrent),
+    };
+  });
+}
+
+function moveItemById<T extends { id: string }>(
+  items: T[],
+  sourceId: string,
+  targetId: string,
+  position: 'before' | 'after'
+): T[] {
+  if (sourceId === targetId) return items;
+  const sourceIndex = items.findIndex((item) => item.id === sourceId);
+  if (sourceIndex === -1) return items;
+  const rest = items.filter((item) => item.id !== sourceId);
+  const destIndex = rest.findIndex((item) => item.id === targetId);
+  if (destIndex === -1) return items;
+  const insertIndex = position === 'after' ? destIndex + 1 : destIndex;
+  if (insertIndex === sourceIndex) return items;
+  const next = [...rest];
+  next.splice(insertIndex, 0, items[sourceIndex]!);
+  return next;
+}
+
+function normalizeNoteCards(
+  rawCards: unknown,
+  legacyNotes: unknown
+): CharacterNote[] {
+  if (Array.isArray(rawCards)) {
+    return rawCards.map((entry, index) => {
+      const note = entry as Partial<CharacterNote> | undefined;
+      return {
+        id:
+          typeof note?.id === 'string' && note.id.trim().length > 0
+            ? note.id
+            : `note-${index + 1}`,
+        title: typeof note?.title === 'string' ? note.title.slice(0, 120) : '',
+        content:
+          typeof note?.content === 'string' ? note.content.slice(0, 4000) : '',
+      };
+    });
+  }
+  if (typeof legacyNotes === 'string' && legacyNotes.trim().length > 0) {
+    return [
+      {
+        id: 'legacy-note',
+        title: 'Заметка',
+        content: legacyNotes.slice(0, 4000),
+      },
+    ];
+  }
+  return [];
+}
 
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingPatches = new Map<string, UpdateCharacterPatch>();
@@ -66,9 +236,11 @@ function normalizeWeaponAttacks(raw: WeaponAttack[] | undefined): WeaponAttack[]
 }
 
 function normalizeCharacter(raw: Character): Character {
+  const parsedSize = CreatureSizeSchema.safeParse(raw.size);
   return {
     ...raw,
     subclass_name: raw.subclass_name ?? null,
+    size: parsedSize.success ? parsedSize.data : 'medium',
     stats: {
       str: raw.stats?.str ?? 10,
       dex: raw.stats?.dex ?? 10,
@@ -88,6 +260,13 @@ function normalizeCharacter(raw: Character): Character {
       armor: raw.proficiencies?.armor ?? [],
       tools: raw.proficiencies?.tools ?? [],
       languages: raw.proficiencies?.languages ?? ['Common'],
+      customProficiencies: Array.isArray(raw.proficiencies?.customProficiencies)
+        ? raw.proficiencies.customProficiencies.map((entry, index) => ({
+            id: typeof entry?.id === 'string' && entry.id.trim() !== '' ? entry.id : `prof-${index}`,
+            text: typeof entry?.text === 'string' ? entry.text.slice(0, 200) : '',
+          }))
+        : [],
+      heavyArmorStealthDisadvantage: Boolean(raw.proficiencies?.heavyArmorStealthDisadvantage),
     },
     hp: {
       current: raw.hp?.current ?? 10,
@@ -129,20 +308,26 @@ function normalizeCharacter(raw: Character): Character {
           description: typeof res?.description === 'string' ? res.description : '',
         }))
       : [],
-    inventory: Array.isArray(raw.inventory)
-      ? raw.inventory.map((item, index) => ({
-          id: typeof item?.id === 'string' && item.id.trim() !== '' ? item.id : `item-${index}`,
-          compendium_slug: item?.compendium_slug,
-          name: typeof item?.name === 'string' ? item.name : '',
-          description: typeof item?.description === 'string' ? item.description : '',
-          quantity: typeof item?.quantity === 'number' ? Math.max(0, item.quantity) : 1,
-          equipped: Boolean(item?.equipped),
-          attuned: Boolean(item?.attuned),
-          weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
-          overrides: item?.overrides,
+    inventory: normalizeInventoryList(raw.inventory),
+    bag_of_holding: {
+      enabled: Boolean(raw.bag_of_holding?.enabled),
+      items: normalizeInventoryList(raw.bag_of_holding?.items),
+    },
+    passive_traits: Array.isArray(raw.passive_traits)
+      ? raw.passive_traits.map((trait, index) => ({
+          id: typeof trait?.id === 'string' && trait.id.trim().length > 0 ? trait.id : `passive-${index + 1}`,
+          name: typeof trait?.name === 'string' ? trait.name.slice(0, 80) : '',
+          description: typeof trait?.description === 'string' ? trait.description.slice(0, 800) : '',
         }))
       : [],
+    currency: {
+      pp: clampCoin(raw.currency?.pp),
+      gp: clampCoin(raw.currency?.gp),
+      sp: clampCoin(raw.currency?.sp),
+      cp: clampCoin(raw.currency?.cp),
+    },
     weapon_attacks: normalizeWeaponAttacks(raw.weapon_attacks),
+    note_cards: normalizeNoteCards(raw.note_cards, raw.notes),
   };
 }
 
@@ -158,7 +343,7 @@ interface CharacterStoreState {
   deleteCharacter: (id: string) => Promise<void>;
 
   updateIdentity: (
-    patch: Partial<Pick<Character, 'name' | 'species' | 'class_name' | 'subclass_name'>>
+    patch: Partial<Pick<Character, 'name' | 'species' | 'class_name' | 'subclass_name' | 'size'>>
   ) => void;
   setLevel: (level: number) => void;
   setExhaustion: (exhaustion: number) => void;
@@ -168,6 +353,10 @@ interface CharacterStoreState {
   setSkillBonus: (skill: SkillKey, bonus: number) => void;
   setSaveBonus: (ability: AbilityKey, bonus: number) => void;
   addBonusToAllSkills: (amount: number) => void;
+  addCustomProficiency: (text?: string) => string;
+  updateCustomProficiency: (id: string, text: string) => void;
+  deleteCustomProficiency: (id: string) => void;
+  toggleHeavyArmorStealthDisadvantage: () => void;
   updateHpAndCombat: (patch: Partial<CharacterHp>) => void;
   setSpellcastingAbility: (ability: AbilityKey | null) => void;
   updateSpellSlot: (slotLevel: number, patch: { current?: number; max?: number }) => void;
@@ -177,9 +366,24 @@ interface CharacterStoreState {
   addCustomResource: (resource?: Partial<CustomResource>) => void;
   updateCustomResource: (id: string, patch: Partial<CustomResource>) => void;
   deleteCustomResource: (id: string) => void;
+  addPassiveTrait: (trait?: Partial<PassiveTrait>) => void;
+  updatePassiveTrait: (id: string, patch: Partial<PassiveTrait>) => void;
+  deletePassiveTrait: (id: string) => void;
   addInventoryItem: (item?: Partial<InventoryItem>) => void;
   updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => void;
   deleteInventoryItem: (id: string) => void;
+  reorderInventoryItem: (sourceId: string, targetId: string, position: 'before' | 'after') => void;
+  setBagOfHoldingEnabled: (enabled: boolean) => void;
+  addBagOfHoldingItem: (item?: Partial<InventoryItem>) => void;
+  updateBagOfHoldingItem: (id: string, patch: Partial<InventoryItem>) => void;
+  deleteBagOfHoldingItem: (id: string) => void;
+  reorderBagOfHoldingItem: (sourceId: string, targetId: string, position: 'before' | 'after') => void;
+  setCurrencyCoin: (coin: CurrencyCode, amount: number) => void;
+  applyCurrencyChange: (params: {
+    coin: CurrencyCode;
+    amount: number;
+    mode: 'add' | 'spend';
+  }) => void;
   addSpellToCharacter: (slug: string) => void;
   removeSpellFromCharacter: (slug: string) => void;
   togglePreparedSpell: (slug: string) => void;
@@ -195,6 +399,17 @@ interface CharacterStoreState {
   takeShortRest: () => void;
   takeLongRest: () => void;
   updateNotes: (notes: string) => void;
+  addNoteCard: (note?: Partial<CharacterNote>) => string;
+  updateNoteCard: (
+    id: string,
+    patch: Partial<Pick<CharacterNote, 'title' | 'content'>>
+  ) => void;
+  deleteNoteCard: (id: string) => void;
+  reorderNoteCard: (
+    sourceId: string,
+    targetId: string,
+    position: 'before' | 'after'
+  ) => void;
   saveActiveCharacter: () => Promise<void>;
 }
 
@@ -256,6 +471,61 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       characters: characters.map((c) => (c.id === activeCharacterId ? updated : c)),
     });
     schedulePatch(activeCharacterId, patch);
+  };
+
+  const updateCustomProficiencies = (
+    transform: (entries: CustomProficiencyEntry[]) => CustomProficiencyEntry[]
+  ) => {
+    applyActiveUpdate((current) => {
+      const nextProficiencies = {
+        ...current.proficiencies,
+        customProficiencies: transform(current.proficiencies.customProficiencies ?? []),
+      };
+      return {
+        updated: { ...current, proficiencies: nextProficiencies },
+        patch: { proficiencies: nextProficiencies },
+      };
+    });
+  };
+
+  const updatePassiveTraits = (
+    transform: (traits: PassiveTrait[]) => PassiveTrait[]
+  ) => {
+    applyActiveUpdate((current) => {
+      const nextTraits = transform(current.passive_traits ?? []);
+      return {
+        updated: { ...current, passive_traits: nextTraits },
+        patch: { passive_traits: nextTraits },
+      };
+    });
+  };
+
+  const updateInventory = (
+    transform: (items: InventoryItem[]) => InventoryItem[]
+  ) => {
+    applyActiveUpdate((current) => {
+      const nextInventory = transform(current.inventory ?? []);
+      return {
+        updated: { ...current, inventory: nextInventory },
+        patch: { inventory: nextInventory },
+      };
+    });
+  };
+
+  const updateBagOfHolding = (
+    transform: (bag: BagOfHolding) => BagOfHolding
+  ) => {
+    applyActiveUpdate((current) => {
+      const currentBag: BagOfHolding = current.bag_of_holding ?? {
+        enabled: false,
+        items: [],
+      };
+      const nextBag = transform(currentBag);
+      return {
+        updated: { ...current, bag_of_holding: nextBag },
+        patch: { bag_of_holding: nextBag },
+      };
+    });
   };
 
   return {
@@ -569,6 +839,39 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       });
     },
 
+    addCustomProficiency: (text = '') => {
+      const id = crypto.randomUUID();
+      updateCustomProficiencies((entries) => [...entries, { id, text: text.slice(0, 200) }]);
+      return id;
+    },
+
+    updateCustomProficiency: (id, text) => {
+      updateCustomProficiencies((entries) =>
+        entries.map((entry) =>
+          entry.id === id ? { ...entry, text: text.slice(0, 200) } : entry
+        )
+      );
+    },
+
+    deleteCustomProficiency: (id) => {
+      updateCustomProficiencies((entries) => entries.filter((entry) => entry.id !== id));
+    },
+
+    toggleHeavyArmorStealthDisadvantage: () => {
+      applyActiveUpdate((current) => {
+        const nextProficiencies = {
+          ...current.proficiencies,
+          heavyArmorStealthDisadvantage: !Boolean(
+            current.proficiencies.heavyArmorStealthDisadvantage
+          ),
+        };
+        return {
+          updated: { ...current, proficiencies: nextProficiencies },
+          patch: { proficiencies: nextProficiencies },
+        };
+      });
+    },
+
     updateHpAndCombat: (patch) => {
       applyActiveUpdate((current) => {
         const nextCurrent =
@@ -763,51 +1066,125 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       });
     },
 
-    addInventoryItem: (item) => {
-      applyActiveUpdate((current) => {
-        const nextInventory: InventoryItem[] = [
-          ...(current.inventory ?? []),
-          {
-            id: item?.id ?? crypto.randomUUID(),
-            name: typeof item?.name === 'string' ? item.name : '',
-            description: typeof item?.description === 'string' ? item.description : '',
-            quantity: typeof item?.quantity === 'number' ? Math.max(0, item.quantity) : 1,
-            equipped: Boolean(item?.equipped),
-            attuned: Boolean(item?.attuned),
-            weight: typeof item?.weight === 'number' ? Math.max(0, item.weight) : 0,
-          },
-        ];
-        return {
-          updated: { ...current, inventory: nextInventory },
-          patch: { inventory: nextInventory },
+    addPassiveTrait: (trait) => {
+      updatePassiveTraits((traits) => {
+        if (traits.length >= 30) return traits;
+        const newTrait: PassiveTrait = {
+          id: trait?.id?.trim() || crypto.randomUUID(),
+          name: (trait?.name ?? '').slice(0, 80),
+          description: (trait?.description ?? '').slice(0, 800),
         };
+        return [...traits, newTrait];
       });
+    },
+
+    updatePassiveTrait: (id, patch) => {
+      updatePassiveTraits((traits) =>
+        traits.map((trait) => {
+          if (trait.id !== id) return trait;
+          return {
+            ...trait,
+            name: patch.name !== undefined ? patch.name.slice(0, 80) : trait.name,
+            description:
+              patch.description !== undefined
+                ? patch.description.slice(0, 800)
+                : trait.description,
+          };
+        })
+      );
+    },
+
+    deletePassiveTrait: (id) => {
+      updatePassiveTraits((traits) => traits.filter((trait) => trait.id !== id));
+    },
+
+    addInventoryItem: (item) => {
+      updateInventory((items) => appendInventoryItem(items, item));
     },
 
     updateInventoryItem: (id, patch) => {
+      updateInventory((items) => patchInventoryItem(items, id, patch));
+    },
+
+    deleteInventoryItem: (id) => {
+      updateInventory((items) => items.filter((item) => item.id !== id));
+    },
+
+    reorderInventoryItem: (sourceId, targetId, position) => {
+      updateInventory((items) =>
+        moveItemById(items, sourceId, targetId, position)
+      );
+    },
+
+    setBagOfHoldingEnabled: (enabled) => {
+      updateBagOfHolding((bag) => ({
+        ...bag,
+        enabled,
+      }));
+    },
+
+    addBagOfHoldingItem: (item) => {
+      updateBagOfHolding((bag) => ({
+        ...bag,
+        items: appendInventoryItem(bag.items, item),
+      }));
+    },
+
+    updateBagOfHoldingItem: (id, patch) => {
+      updateBagOfHolding((bag) => ({
+        ...bag,
+        items: patchInventoryItem(bag.items, id, patch),
+      }));
+    },
+
+    deleteBagOfHoldingItem: (id) => {
+      updateBagOfHolding((bag) => ({
+        ...bag,
+        items: bag.items.filter((item) => item.id !== id),
+      }));
+    },
+
+    reorderBagOfHoldingItem: (sourceId, targetId, position) => {
+      updateBagOfHolding((bag) => ({
+        ...bag,
+        items: moveItemById(bag.items, sourceId, targetId, position),
+      }));
+    },
+
+    setCurrencyCoin: (coin, amount) => {
       applyActiveUpdate((current) => {
-        const nextInventory = (current.inventory ?? []).map((item) => {
-          if (item.id !== id) return item;
-          return {
-            ...item,
-            ...patch,
-          };
-        });
+        const prev = current.currency ?? { pp: 0, gp: 0, sp: 0, cp: 0 };
+        const nextCurrency: CharacterCurrency = {
+          ...prev,
+          [coin]: clampCoin(amount),
+        };
         return {
-          updated: { ...current, inventory: nextInventory },
-          patch: { inventory: nextInventory },
+          updated: { ...current, currency: nextCurrency },
+          patch: { currency: nextCurrency },
         };
       });
     },
 
-    deleteInventoryItem: (id) => {
-      applyActiveUpdate((current) => {
-        const nextInventory = (current.inventory ?? []).filter((item) => item.id !== id);
-        return {
-          updated: { ...current, inventory: nextInventory },
-          patch: { inventory: nextInventory },
-        };
+    applyCurrencyChange: ({ coin, amount, mode }) => {
+      const safeAmount = clampCoin(amount);
+      if (safeAmount <= 0) return;
+      const { activeCharacterId, characters } = get();
+      const active = characters.find((c) => c.id === activeCharacterId);
+      if (!active) return;
+
+      const prev = active.currency ?? { pp: 0, gp: 0, sp: 0, cp: 0 };
+      const result = applyCurrencyTransaction({
+        currency: prev,
+        coin,
+        amount: safeAmount,
+        mode,
       });
+      if (!result.ok) return;
+
+      applyActiveUpdate((current) => ({
+        updated: { ...current, currency: result.next },
+        patch: { currency: result.next },
+      }));
     },
 
     addSpellToCharacter: (slug) => {
@@ -1013,6 +1390,82 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
       }));
     },
 
+    addNoteCard: (note) => {
+      const id =
+        note?.id && note.id.trim().length > 0 ? note.id : crypto.randomUUID();
+      applyActiveUpdate((current) => {
+        const nextCards: CharacterNote[] = [
+          ...(current.note_cards ?? []),
+          {
+            id,
+            title:
+              typeof note?.title === 'string' ? note.title.slice(0, 120) : '',
+            content:
+              typeof note?.content === 'string'
+                ? note.content.slice(0, 4000)
+                : '',
+          },
+        ];
+        return {
+          updated: { ...current, note_cards: nextCards },
+          patch: { note_cards: nextCards },
+        };
+      });
+      return id;
+    },
+
+    updateNoteCard: (id, patch) => {
+      applyActiveUpdate((current) => {
+        const nextCards = (current.note_cards ?? []).map((card) =>
+          card.id !== id
+            ? card
+            : {
+                ...card,
+                title:
+                  patch.title !== undefined
+                    ? patch.title.slice(0, 120)
+                    : card.title,
+                content:
+                  patch.content !== undefined
+                    ? patch.content.slice(0, 4000)
+                    : card.content,
+              }
+        );
+        return {
+          updated: { ...current, note_cards: nextCards },
+          patch: { note_cards: nextCards },
+        };
+      });
+    },
+
+    deleteNoteCard: (id) => {
+      applyActiveUpdate((current) => {
+        const nextCards = (current.note_cards ?? []).filter(
+          (card) => card.id !== id
+        );
+        return {
+          updated: { ...current, note_cards: nextCards },
+          patch: { note_cards: nextCards },
+        };
+      });
+    },
+
+    reorderNoteCard: (sourceId, targetId, position) => {
+      applyActiveUpdate((current) => {
+        const currentCards = current.note_cards ?? [];
+        const nextCards = moveItemById(
+          currentCards,
+          sourceId,
+          targetId,
+          position
+        );
+        return {
+          updated: { ...current, note_cards: nextCards },
+          patch: { note_cards: nextCards },
+        };
+      });
+    },
+
     saveActiveCharacter: async () => {
       const { activeCharacterId, characters } = get();
       if (!activeCharacterId) return;
@@ -1034,15 +1487,20 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
         species: current.species,
         class_name: current.class_name,
         subclass_name: current.subclass_name,
+        size: current.size,
         stats: current.stats,
         proficiencies: current.proficiencies,
         hp: current.hp,
         exhaustion: current.exhaustion,
         custom_resources: current.custom_resources,
+        passive_traits: current.passive_traits,
         inventory: current.inventory,
+        bag_of_holding: current.bag_of_holding,
+        currency: current.currency,
         weapon_attacks: current.weapon_attacks,
         spells: current.spells,
         notes: current.notes,
+        note_cards: current.note_cards,
       };
 
       try {

@@ -55,6 +55,7 @@ function buildDefaultCharacterRow(
     species: overrides.species ?? 'Человек',
     class_name: overrides.class_name ?? 'Воин',
     subclass_name: overrides.subclass_name ?? null,
+    size: overrides.size ?? 'medium',
     stats: overrides.stats ?? {
       str: 10,
       dex: 10,
@@ -74,6 +75,8 @@ function buildDefaultCharacterRow(
       armor: [],
       tools: [],
       languages: ['Common'],
+      customProficiencies: [],
+      heavyArmorStealthDisadvantage: false,
     },
     hp: overrides.hp ?? {
       current: 10,
@@ -90,7 +93,10 @@ function buildDefaultCharacterRow(
     },
     exhaustion: overrides.exhaustion ?? 0,
     custom_resources: overrides.custom_resources ?? [],
+    passive_traits: overrides.passive_traits ?? [],
     inventory: overrides.inventory ?? [],
+    bag_of_holding: overrides.bag_of_holding ?? { enabled: false, items: [] },
+    currency: overrides.currency ?? { pp: 0, gp: 0, sp: 0, cp: 0 },
     weapon_attacks: overrides.weapon_attacks ?? [],
     spells: overrides.spells ?? {
       spellcastingAbility: null,
@@ -100,6 +106,7 @@ function buildDefaultCharacterRow(
       knownSlugs: [],
     },
     notes: overrides.notes ?? '',
+    note_cards: overrides.note_cards ?? [],
     updated_at: new Date(),
   };
 }
@@ -311,16 +318,21 @@ app.patch('/api/characters/:id', async (c) => {
   if (patch.species !== undefined) updateData.species = patch.species;
   if (patch.class_name !== undefined) updateData.class_name = patch.class_name;
   if (patch.subclass_name !== undefined) updateData.subclass_name = patch.subclass_name;
+  if (patch.size !== undefined) updateData.size = patch.size;
   if (patch.stats !== undefined) updateData.stats = patch.stats;
   if (patch.proficiencies !== undefined) updateData.proficiencies = patch.proficiencies;
   if (patch.hp !== undefined) updateData.hp = patch.hp;
   if (patch.exhaustion !== undefined) updateData.exhaustion = patch.exhaustion;
   if (patch.custom_resources !== undefined)
     updateData.custom_resources = patch.custom_resources;
+  if (patch.passive_traits !== undefined) updateData.passive_traits = patch.passive_traits;
   if (patch.inventory !== undefined) updateData.inventory = patch.inventory;
+  if (patch.bag_of_holding !== undefined) updateData.bag_of_holding = patch.bag_of_holding;
+  if (patch.currency !== undefined) updateData.currency = patch.currency;
   if (patch.weapon_attacks !== undefined) updateData.weapon_attacks = patch.weapon_attacks;
   if (patch.spells !== undefined) updateData.spells = patch.spells;
   if (patch.notes !== undefined) updateData.notes = patch.notes;
+  if (patch.note_cards !== undefined) updateData.note_cards = patch.note_cards;
 
   await db.update(characters).set(updateData).where(eq(characters.id, id));
 

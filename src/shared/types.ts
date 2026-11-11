@@ -168,6 +168,12 @@ export const DND55E_SKILLS: readonly SkillDefinition[] = [
   { key: 'animal_handling', label: 'Уход за животными', ability: 'wis', abilityShortLabel: 'МДР' },
 ] as const;
 
+export const CustomProficiencyEntrySchema = z.object({
+  id: z.string().min(1),
+  text: z.string().max(200).default(''),
+});
+export type CustomProficiencyEntry = z.infer<typeof CustomProficiencyEntrySchema>;
+
 export const CharacterProficienciesSchema = z.object({
   savingThrows: z.array(AbilityKeySchema).default([]),
   skills: z.record(z.string(), ProficiencyRankSchema).default({}),
@@ -185,6 +191,8 @@ export const CharacterProficienciesSchema = z.object({
   armor: z.array(z.string()).default([]),
   tools: z.array(z.string()).default([]),
   languages: z.array(z.string()).default(['Common']),
+  customProficiencies: z.array(CustomProficiencyEntrySchema).default([]),
+  heavyArmorStealthDisadvantage: z.boolean().default(false),
 });
 export type CharacterProficiencies = z.infer<typeof CharacterProficienciesSchema>;
 
@@ -246,15 +254,49 @@ export const CustomResourceSchema = z.object({
 });
 export type CustomResource = z.infer<typeof CustomResourceSchema>;
 
+export const PassiveTraitSchema = z.object({
+  id: z.string(),
+  name: z.string().max(80).default(''),
+  description: z.string().max(800).default(''),
+});
+export type PassiveTrait = z.infer<typeof PassiveTraitSchema>;
+
+export const CreatureSizeSchema = z.enum([
+  'tiny',
+  'small',
+  'medium',
+  'large',
+  'huge',
+  'gargantuan',
+]);
+export type CreatureSize = z.infer<typeof CreatureSizeSchema>;
+
+export const CurrencyCodeSchema = z.enum(['pp', 'gp', 'sp', 'cp']);
+export type CurrencyCode = z.infer<typeof CurrencyCodeSchema>;
+
+export const CharacterCurrencySchema = z.object({
+  pp: z.number().int().min(0).max(9999999).default(0),
+  gp: z.number().int().min(0).max(9999999).default(0),
+  sp: z.number().int().min(0).max(9999999).default(0),
+  cp: z.number().int().min(0).max(9999999).default(0),
+});
+export type CharacterCurrency = z.infer<typeof CharacterCurrencySchema>;
+
+export const WeightUnitSchema = z.enum(['lb', 'kg']);
+export type WeightUnit = z.infer<typeof WeightUnitSchema>;
+
 export const InventoryItemSchema = z.object({
   id: z.string(),
   compendium_slug: z.string().optional(),
   name: z.string().default(''),
   description: z.string().optional(),
-  quantity: z.number().int().min(0).default(1),
+  quantity: z.number().int().min(0).max(9999).default(1),
   equipped: z.boolean().default(false),
   attuned: z.boolean().default(false),
   weight: z.number().min(0).optional(),
+  weightUnit: WeightUnitSchema.default('lb'),
+  chargesCurrent: z.number().int().min(0).max(30).default(0),
+  chargesMax: z.number().int().min(0).max(30).default(0),
   overrides: z
     .object({
       damage: z.string().optional(),
@@ -266,6 +308,19 @@ export const InventoryItemSchema = z.object({
     .optional(),
 });
 export type InventoryItem = z.infer<typeof InventoryItemSchema>;
+
+export const BagOfHoldingSchema = z.object({
+  enabled: z.boolean().default(false),
+  items: z.array(InventoryItemSchema).default([]),
+});
+export type BagOfHolding = z.infer<typeof BagOfHoldingSchema>;
+
+export const CharacterNoteSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().max(120).default(''),
+  content: z.string().max(4000).default(''),
+});
+export type CharacterNote = z.infer<typeof CharacterNoteSchema>;
 
 export const WeaponAttackSchema = z.object({
   id: z.string().min(1),
@@ -310,15 +365,20 @@ export const CharacterSchema = z.object({
   species: z.string(),
   class_name: z.string(),
   subclass_name: z.string().nullable().default(null),
+  size: CreatureSizeSchema.default('medium'),
   stats: CharacterStatsSchema,
   proficiencies: CharacterProficienciesSchema,
   hp: CharacterHpSchema,
   exhaustion: z.number().int().min(0).max(6).default(0),
   custom_resources: z.array(CustomResourceSchema).default([]),
+  passive_traits: z.array(PassiveTraitSchema).default([]),
   inventory: z.array(InventoryItemSchema).default([]),
+  bag_of_holding: BagOfHoldingSchema.default({ enabled: false, items: [] }),
+  currency: CharacterCurrencySchema.default({ pp: 0, gp: 0, sp: 0, cp: 0 }),
   weapon_attacks: z.array(WeaponAttackSchema).default([]),
   spells: CharacterSpellsSchema,
   notes: z.string().default(''),
+  note_cards: z.array(CharacterNoteSchema).default([]),
   updated_at: z.union([z.number().int(), z.string(), z.date()]).optional(),
 });
 export type Character = z.infer<typeof CharacterSchema>;
@@ -340,15 +400,20 @@ export const UpdateCharacterPatchSchema = z.object({
   species: z.string().optional(),
   class_name: z.string().optional(),
   subclass_name: z.string().nullable().optional(),
+  size: CreatureSizeSchema.optional(),
   stats: CharacterStatsSchema.optional(),
   proficiencies: CharacterProficienciesSchema.optional(),
   hp: CharacterHpSchema.optional(),
   exhaustion: z.number().int().min(0).max(6).optional(),
   custom_resources: z.array(CustomResourceSchema).optional(),
+  passive_traits: z.array(PassiveTraitSchema).optional(),
   inventory: z.array(InventoryItemSchema).optional(),
+  bag_of_holding: BagOfHoldingSchema.optional(),
+  currency: CharacterCurrencySchema.optional(),
   weapon_attacks: z.array(WeaponAttackSchema).optional(),
   spells: CharacterSpellsSchema.optional(),
   notes: z.string().optional(),
+  note_cards: z.array(CharacterNoteSchema).optional(),
 });
 export type UpdateCharacterPatch = z.infer<typeof UpdateCharacterPatchSchema>;
 

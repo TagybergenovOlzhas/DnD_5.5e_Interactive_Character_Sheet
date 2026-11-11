@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import {
+  Backpack,
   BookOpen,
   Check,
   ChevronDown,
@@ -11,6 +12,7 @@ import {
   Filter,
   Folder,
   FolderOpen,
+  GripVertical,
   Loader2,
   Moon,
   MoreHorizontal,
@@ -24,29 +26,71 @@ import {
   X,
 } from 'lucide-react';
 import {
+  BAG_OF_HOLDING_CAPACITY_POUNDS,
+  BAG_OF_HOLDING_SELF_WEIGHT_POUNDS,
+  BAG_OF_HOLDING_VOLUME_CUBIC_FEET,
+  CREATURE_SIZE_CARRY_MULTIPLIER,
+  applyConditionSpeed,
+  applyCurrencyTransaction,
   calculateAbilityModifier,
+  calculateCarryingCapacity,
+  calculateConditionEffects,
   calculateD20TestModifier,
   calculateEffectiveSpeed,
   calculateInitiativeModifier,
+  calculateInventoryTotalPoundsRaw,
   calculatePassivePerception,
   calculateProficiencyBonus,
   calculateSpellAttackBonus,
   calculateSpellSaveDC,
   calculateWeaponAttackBonus,
   calculateWeaponDamageBonus,
-  applyConditionSpeed,
-  calculateConditionEffects,
+  convertWeight,
+  currencyToCopper,
+  poundsToKg,
+  roundWeight,
 } from '@shared/rulesEngine';
 import {
   DND55E_CONDITIONS,
   DND55E_SKILLS,
   type AbilityKey,
   type CompendiumEntry,
+  type CreatureSize,
+  type CurrencyCode,
+  type InventoryItem,
   type ProficiencyRank,
   type ResourceResetTrigger,
   type VaultFileNode,
+  type WeightUnit,
 } from '@shared/types';
 import { useCharacterStore } from './store';
+import { NotesPage } from './components/NotesPage';
+
+const CREATURE_SIZE_OPTIONS: readonly {
+  value: CreatureSize;
+  label: string;
+  multiplier: number;
+}[] = [
+  { value: 'tiny', label: 'Крошечный', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.tiny },
+  { value: 'small', label: 'Маленький', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.small },
+  { value: 'medium', label: 'Средний', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.medium },
+  { value: 'large', label: 'Большой', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.large },
+  { value: 'huge', label: 'Огромный', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.huge },
+  { value: 'gargantuan', label: 'Громадный', multiplier: CREATURE_SIZE_CARRY_MULTIPLIER.gargantuan },
+];
+
+const CURRENCY_META: readonly {
+  code: CurrencyCode;
+  short: string;
+  label: string;
+  dotClass: string;
+  highlight?: boolean;
+}[] = [
+  { code: 'pp', short: 'ПМ', label: 'Платина', dotClass: 'bg-[var(--mist)]' },
+  { code: 'gp', short: 'ЗМ', label: 'Золото', dotClass: 'bg-[var(--ochre)]', highlight: true },
+  { code: 'sp', short: 'СМ', label: 'Серебро', dotClass: 'bg-[var(--muted)]' },
+  { code: 'cp', short: 'ММ', label: 'Медь', dotClass: 'bg-[var(--clay)]' },
+];
 
 const SPELL_CLASSES = [
   'Бард',
@@ -94,7 +138,7 @@ const ABILITY_META: Record<AbilityKey, { short: string; full: string }> = {
 
 const ABILITY_ORDER: readonly AbilityKey[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
 
-type DockTab = 'sheet' | 'inventory' | 'compendium';
+type DockTab = 'sheet' | 'inventory' | 'compendium' | 'notes';
 
 function formatSigned(value: number): string {
   return value >= 0 ? `+${value}` : `${value}`;
@@ -381,6 +425,587 @@ function SkillDot({ rank }: { rank: ProficiencyRank }): React.JSX.Element {
   );
 }
 
+/**
+ * Breastplate / cuirass icon indicating heavy armor stealth disadvantage.
+ */
+function ArmorIcon({ filled = false }: { filled?: boolean }): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="w-3.5 h-3.5"
+    >
+      <path d="M9 4c1 2.2 5 2.2 6 0l4 2 1.5 4.5-3.5 1v7L12 21l-5-2.5v-7l-3.5-1L5 6l4-2Z" />
+    </svg>
+  );
+}
+
+/**
+ * Interactive row of circular charge/slot pips:
+ * Filled (`bg-[var(--ink)]`) = available; hollow (`bg-[var(--card)]` with border) = spent.
+ */
+function ChargePips({
+  available,
+  max,
+  onChange,
+  sizeClass,
+  getAriaLabel,
+  availableTitle,
+  spentTitle,
+}: {
+  available: number;
+  max: number;
+  onChange: (nextAvailable: number) => void;
+  sizeClass: string;
+  getAriaLabel: (index: number, isAvailable: boolean) => string;
+  availableTitle: string;
+  spentTitle: string;
+}): React.JSX.Element {
+  return (
+    <>
+      {Array.from({ length: max }).map((_, idx) => {
+        const isAvailable = idx < available;
+        return (
+          <button
+            key={idx}
+            type="button"
+            aria-label={getAriaLabel(idx, isAvailable)}
+            onClick={() => {
+              const nextAvailable =
+                isAvailable && idx + 1 === available ? idx : idx + 1;
+              onChange(nextAvailable);
+            }}
+            title={isAvailable ? availableTitle : spentTitle}
+            className={`${sizeClass} rounded-full transition-all cursor-pointer ${
+              isAvailable
+                ? 'bg-[var(--ink)]'
+                : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--ink)]'
+            }`}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/**
+ * Compact D&D 5.5e carry weight calculator meter showing remaining and occupied
+ * weight simultaneously in pounds (фт) and kilograms (кг).
+ */
+function CarryWeightMeter({
+  rawUsedPounds,
+  capacityPounds,
+  barTrackClass = 'bg-[var(--paper)]',
+  extraUsedNote,
+  overloadNote,
+}: {
+  rawUsedPounds: number;
+  capacityPounds: number;
+  barTrackClass?: string;
+  extraUsedNote?: React.ReactNode;
+  overloadNote?: React.ReactNode;
+}): React.JSX.Element {
+  const rawAvailable = capacityPounds - rawUsedPounds;
+  const usedLb = roundWeight(rawUsedPounds);
+  const usedKg = poundsToKg(rawUsedPounds);
+  const capacityLb = roundWeight(capacityPounds);
+  const capacityKg = poundsToKg(capacityPounds);
+  const availableLb = roundWeight(rawAvailable);
+  const availableKg = poundsToKg(rawAvailable);
+  const isOverloaded = availableLb < 0 || availableKg < 0;
+  const fillPercent =
+    capacityPounds > 0
+      ? Math.min(100, (rawUsedPounds / capacityPounds) * 100)
+      : rawUsedPounds > 0
+        ? 100
+        : 0;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="flex items-baseline gap-1.5">
+          <span
+            className={`text-[10px] uppercase tracking-[0.12em] font-semibold ${
+              isOverloaded ? 'text-[var(--clay)]' : 'text-[var(--muted)]'
+            }`}
+          >
+            {isOverloaded ? 'Перегруз' : 'Доступно'}
+          </span>
+          <span
+            className={`font-serif text-lg font-semibold leading-none tabular-nums ${
+              isOverloaded ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
+            }`}
+          >
+            {availableLb} фт
+          </span>
+          <span className="text-[11px] text-[var(--muted)] tabular-nums leading-none">
+            ·{' '}
+            <strong
+              className={`font-semibold ${
+                isOverloaded ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
+              }`}
+            >
+              {availableKg} кг
+            </strong>
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-baseline gap-1.5 text-[11px] text-[var(--muted)] tabular-nums leading-none">
+          <span>
+            Занято:{' '}
+            <strong
+              className={`font-semibold ${
+                isOverloaded ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
+              }`}
+            >
+              {usedLb}
+            </strong>{' '}
+            / {capacityLb} фт{' '}
+            <span className="opacity-75">
+              ({usedKg} / {capacityKg} кг)
+            </span>
+          </span>
+          {extraUsedNote}
+        </div>
+      </div>
+
+      <div className={`h-1.5 w-full rounded-full ${barTrackClass} overflow-hidden`}>
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${
+            isOverloaded
+              ? 'bg-[var(--clay)]'
+              : capacityPounds > 0 && rawUsedPounds / capacityPounds >= 0.8
+                ? 'bg-[var(--ochre)]'
+                : 'bg-[var(--sage)]'
+          }`}
+          style={{ width: `${fillPercent}%` }}
+        />
+      </div>
+
+      {isOverloaded && overloadNote && (
+        <p className="text-[10px] text-[var(--clay)] font-medium tabular-nums leading-snug pt-0.5">
+          {overloadNote}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Shared reorderable inventory item list used by both Inventory and Bag of Holding.
+ */
+function InventoryItemsList({
+  characterId,
+  items,
+  onUpdate,
+  onDelete,
+  onReorder,
+  emptyHint,
+}: {
+  characterId: string;
+  items: InventoryItem[];
+  onUpdate: (id: string, patch: Partial<InventoryItem>) => void;
+  onDelete: (id: string) => void;
+  onReorder: (
+    sourceId: string,
+    targetId: string,
+    position: 'before' | 'after'
+  ) => void;
+  emptyHint?: string;
+}): React.JSX.Element {
+  const [menuId, setMenuId] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverTarget, setDragOverTarget] = useState<{
+    id: string;
+    position: 'before' | 'after';
+  } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMenuId(null);
+    setDraggedId(null);
+    setDragOverTarget(null);
+  }, [characterId]);
+
+  useEffect(() => {
+    if (!menuId) return;
+
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setMenuId(null);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setMenuId(null);
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menuId]);
+
+  return (
+    <div
+      className="space-y-2"
+      onDragOver={(e) => {
+        if (draggedId) e.preventDefault();
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+          setDragOverTarget(null);
+        }
+      }}
+      onDrop={() => {
+        if (draggedId && dragOverTarget) {
+          onReorder(draggedId, dragOverTarget.id, dragOverTarget.position);
+        }
+        setDraggedId(null);
+        setDragOverTarget(null);
+      }}
+    >
+      {items.length === 0 && emptyHint && (
+        <p className="text-[11px] font-serif italic text-[var(--muted)] px-1 py-1">
+          {emptyHint}
+        </p>
+      )}
+
+      {items.map((item) => {
+        const itemQuantity = item.quantity ?? 1;
+        const itemWeight = item.weight ?? 0;
+        const itemWeightUnit: WeightUnit =
+          item.weightUnit === 'kg' ? 'kg' : 'lb';
+        const itemWeightUnitLabel = itemWeightUnit === 'kg' ? 'кг' : 'фт';
+        const otherWeightUnit: WeightUnit =
+          itemWeightUnit === 'kg' ? 'lb' : 'kg';
+        const otherWeightUnitLabel = otherWeightUnit === 'kg' ? 'кг' : 'фт';
+        const roundedItemWeight = roundWeight(itemWeight);
+        const convertedItemWeight = convertWeight(
+          itemWeight,
+          itemWeightUnit,
+          otherWeightUnit
+        );
+        const chargesMax = item.chargesMax ?? 0;
+        const chargesCurrent = Math.min(chargesMax, item.chargesCurrent ?? 0);
+        const isDragging = draggedId === item.id;
+        const dropPosition =
+          dragOverTarget?.id === item.id ? dragOverTarget.position : null;
+
+        return (
+          <div
+            key={item.id}
+            draggable
+            onPointerDown={(e) => {
+              const target = e.target as HTMLElement;
+              const interactive = Boolean(
+                target.closest('input, textarea, select, button')
+              );
+              e.currentTarget.draggable = !interactive;
+            }}
+            onDragStart={(e) => {
+              if (
+                (e.target as HTMLElement).closest(
+                  'input, textarea, select, button'
+                )
+              ) {
+                e.preventDefault();
+                return;
+              }
+              setMenuId(null);
+              setDraggedId(item.id);
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', item.id);
+            }}
+            onDragOver={(e) => {
+              if (!draggedId || draggedId === item.id) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              const rect = e.currentTarget.getBoundingClientRect();
+              const position: 'before' | 'after' =
+                e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+              if (
+                dragOverTarget?.id !== item.id ||
+                dragOverTarget.position !== position
+              ) {
+                setDragOverTarget({ id: item.id, position });
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const sourceId =
+                draggedId ?? e.dataTransfer.getData('text/plain');
+              if (sourceId && sourceId !== item.id) {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const position: 'before' | 'after' =
+                  e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                onReorder(sourceId, item.id, position);
+              }
+              setDraggedId(null);
+              setDragOverTarget(null);
+            }}
+            onDragEnd={() => {
+              setDraggedId(null);
+              setDragOverTarget(null);
+            }}
+            className={`relative bg-[var(--paper)] rounded-xl px-2.5 py-2 space-y-1.5 transition-all ${
+              isDragging ? 'opacity-45 scale-[0.99]' : ''
+            }`}
+          >
+            {dropPosition === 'before' && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -top-1.5 left-2 right-2 h-0.5 rounded-full bg-[var(--ink)]"
+              />
+            )}
+            {dropPosition === 'after' && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -bottom-1.5 left-2 right-2 h-0.5 rounded-full bg-[var(--ink)]"
+              />
+            )}
+
+            <div className="flex items-center gap-1.5">
+              {/* Drag Handle */}
+              <span
+                title="Перетащите, чтобы изменить порядок"
+                aria-label="Перетащить предмет"
+                className="w-4 h-6 inline-flex items-center justify-center text-[var(--muted)] hover:text-[var(--ink)] cursor-grab active:cursor-grabbing shrink-0 select-none"
+              >
+                <GripVertical className="w-3.5 h-3.5" />
+              </span>
+
+              {/* Three-Dots Menu */}
+              <div
+                className="relative shrink-0"
+                ref={menuId === item.id ? menuRef : undefined}
+              >
+                <button
+                  type="button"
+                  aria-label="Вес, заряды и количество предмета"
+                  aria-expanded={menuId === item.id}
+                  onClick={() =>
+                    setMenuId((current) =>
+                      current === item.id ? null : item.id
+                    )
+                  }
+                  className={`w-6 h-6 rounded-full inline-flex items-center justify-center cursor-pointer ${
+                    menuId === item.id
+                      ? 'bg-[var(--ink)] text-[var(--paper)]'
+                      : 'text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
+
+                {menuId === item.id && (
+                  <div className="absolute left-0 top-full mt-1.5 z-50 w-60 rounded-2xl bg-[var(--paper)] p-2.5 shadow-lg ring-1 ring-[var(--stone)] space-y-2.5">
+                    {/* Количество */}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                        Количество
+                      </span>
+                      <EditableNumberInput
+                        min={0}
+                        max={9999}
+                        value={itemQuantity}
+                        ariaLabel="Количество предметов"
+                        onChange={(val) => onUpdate(item.id, { quantity: val })}
+                        className="w-16 h-6 rounded-md bg-[var(--card)] text-center text-xs font-semibold tabular-nums text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
+                      />
+                    </div>
+
+                    {/* Вес и единица измерения (фт / кг) */}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                        Вес
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={itemWeight === 0 ? '' : itemWeight}
+                          placeholder="0"
+                          aria-label={`Вес предмета (${itemWeightUnitLabel})`}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            onUpdate(item.id, {
+                              weight: Number.isNaN(val)
+                                ? 0
+                                : Math.max(0, val),
+                            });
+                          }}
+                          className="w-14 h-6 rounded-md bg-[var(--card)] text-center text-xs font-semibold tabular-nums text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
+                        />
+                        <div
+                          role="group"
+                          aria-label="Единица измерения веса"
+                          className="bg-[var(--card)] rounded-md p-0.5 inline-flex shrink-0"
+                        >
+                          {(
+                            [
+                              { code: 'lb', label: 'фт' },
+                              { code: 'kg', label: 'кг' },
+                            ] as const
+                          ).map((unitOpt) => (
+                            <button
+                              key={unitOpt.code}
+                              type="button"
+                              onClick={() => {
+                                if (itemWeightUnit !== unitOpt.code) {
+                                  onUpdate(item.id, {
+                                    weightUnit: unitOpt.code,
+                                  });
+                                }
+                              }}
+                              className={`px-1.5 h-5 rounded text-[10px] font-semibold transition-colors cursor-pointer ${
+                                itemWeightUnit === unitOpt.code
+                                  ? 'bg-[var(--ink)] text-[var(--paper)]'
+                                  : 'text-[var(--muted)] hover:text-[var(--ink)]'
+                              }`}
+                            >
+                              {unitOpt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Заряды */}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                        Заряды
+                      </span>
+                      <EditableNumberInput
+                        min={0}
+                        max={30}
+                        value={chargesMax}
+                        ariaLabel="Максимум зарядов предмета"
+                        onChange={(val) => {
+                          const nextMax = Math.max(0, Math.min(30, val));
+                          const nextCurrent =
+                            chargesMax === 0 || chargesCurrent === chargesMax
+                              ? nextMax
+                              : Math.min(chargesCurrent, nextMax);
+                          onUpdate(item.id, {
+                            chargesMax: nextMax,
+                            chargesCurrent: nextCurrent,
+                          });
+                        }}
+                        className="w-16 h-6 rounded-md bg-[var(--card)] text-center text-xs font-semibold tabular-nums text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <input
+                type="text"
+                value={item.name}
+                maxLength={80}
+                placeholder="Название предмета"
+                aria-label="Название предмета"
+                onChange={(e) => onUpdate(item.id, { name: e.target.value })}
+                className="min-w-0 flex-1 bg-transparent font-serif text-base leading-none text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_50%,transparent)]"
+              />
+
+              {itemQuantity !== 1 && (
+                <span
+                  title={`Количество: ${itemQuantity}`}
+                  className={`rounded-full bg-[var(--card)] px-2 py-0.5 text-[10px] font-semibold tabular-nums shrink-0 ${
+                    itemQuantity === 0
+                      ? 'text-[var(--clay)]'
+                      : 'text-[var(--ink)]'
+                  }`}
+                >
+                  ×{itemQuantity}
+                </span>
+              )}
+
+              {itemWeight > 0 && (
+                <span
+                  title={
+                    itemQuantity > 1
+                      ? `Вес: ${roundedItemWeight} ${itemWeightUnitLabel} (≈ ${convertedItemWeight} ${otherWeightUnitLabel}) × ${itemQuantity} = ${roundWeight(itemWeight * itemQuantity)} ${itemWeightUnitLabel}`
+                      : `Вес: ${roundedItemWeight} ${itemWeightUnitLabel} (≈ ${convertedItemWeight} ${otherWeightUnitLabel})`
+                  }
+                  className="rounded-full bg-[var(--card)] px-2 py-0.5 text-[10px] font-semibold tabular-nums text-[var(--muted)] shrink-0"
+                >
+                  {roundedItemWeight} {itemWeightUnitLabel}
+                </span>
+              )}
+
+              {/* Delete button */}
+              <button
+                type="button"
+                aria-label={`Удалить предмет ${item.name || ''}`.trim()}
+                onClick={() => {
+                  if (menuId === item.id) {
+                    setMenuId(null);
+                  }
+                  onDelete(item.id);
+                }}
+                className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm leading-none flex items-center justify-center cursor-pointer transition-colors shrink-0"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Description Field */}
+            <textarea
+              value={item.description ?? ''}
+              rows={1}
+              maxLength={400}
+              placeholder="Описание предмета..."
+              aria-label="Описание предмета"
+              onChange={(e) =>
+                onUpdate(item.id, { description: e.target.value })
+              }
+              className="w-full resize-y rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-xs leading-snug text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_55%,transparent)] transition-all"
+            />
+
+            {chargesMax > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                <div className="inline-flex items-center gap-1.5 rounded-full bg-[var(--card)] px-2.5 py-1 text-xs font-semibold tabular-nums text-[var(--ink)]">
+                  <span>
+                    {chargesCurrent}/{chargesMax}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+                  <ChargePips
+                    available={chargesCurrent}
+                    max={chargesMax}
+                    sizeClass="w-5 h-5"
+                    onChange={(nextCurrent) =>
+                      onUpdate(item.id, { chargesCurrent: nextCurrent })
+                    }
+                    getAriaLabel={(idx, isAvailable) =>
+                      `Заряд предмета ${idx + 1} (${
+                        isAvailable ? 'доступен' : 'потрачен'
+                      })`
+                    }
+                    availableTitle="Заряд доступен (нажмите, чтобы потратить)"
+                    spentTitle="Заряд потрачен (нажмите, чтобы восстановить)"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function App(): React.JSX.Element {
   const {
     characters,
@@ -400,6 +1025,7 @@ export function App(): React.JSX.Element {
     setSkillBonus,
     setSaveBonus,
     addBonusToAllSkills,
+    toggleHeavyArmorStealthDisadvantage,
     updateHpAndCombat,
     setSpellcastingAbility,
     updateSpellSlot,
@@ -409,9 +1035,20 @@ export function App(): React.JSX.Element {
     addCustomResource,
     updateCustomResource,
     deleteCustomResource,
+    addPassiveTrait,
+    updatePassiveTrait,
+    deletePassiveTrait,
     addInventoryItem,
     updateInventoryItem,
     deleteInventoryItem,
+    reorderInventoryItem,
+    setBagOfHoldingEnabled,
+    addBagOfHoldingItem,
+    updateBagOfHoldingItem,
+    deleteBagOfHoldingItem,
+    reorderBagOfHoldingItem,
+    setCurrencyCoin,
+    applyCurrencyChange,
     addSpellToCharacter,
     removeSpellFromCharacter,
     togglePreparedSpell,
@@ -434,12 +1071,19 @@ export function App(): React.JSX.Element {
   );
   const [activeDockTab, setActiveDockTab] = useState<DockTab>('sheet');
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [conditionMenuOpen, setConditionMenuOpen] = useState(false);
   const [weaponMenuId, setWeaponMenuId] = useState<string | null>(null);
   const [resourceMenuId, setResourceMenuId] = useState<string | null>(null);
+  const [passiveMenuId, setPassiveMenuId] = useState<string | null>(null);
+  const [currencyTxMode, setCurrencyTxMode] = useState<'add' | 'spend'>('add');
+  const [currencyTxCoin, setCurrencyTxCoin] = useState<CurrencyCode>('gp');
+  const [currencyTxAmount, setCurrencyTxAmount] = useState('');
   const [allSkillsBonusDraft, setAllSkillsBonusDraft] = useState('');
   const skillMenuRef = useRef<HTMLDivElement>(null);
+  const conditionMenuRef = useRef<HTMLDivElement>(null);
   const weaponMenuRef = useRef<HTMLDivElement>(null);
   const resourceMenuRef = useRef<HTMLDivElement>(null);
+  const passiveMenuRef = useRef<HTMLDivElement>(null);
 
   // Spells & Compendium state
   const [isSpellModalOpen, setIsSpellModalOpen] = useState(false);
@@ -544,8 +1188,11 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     setConfirmDeleteId(null);
     setSkillMenuOpen(false);
+    setConditionMenuOpen(false);
     setWeaponMenuId(null);
     setResourceMenuId(null);
+    setPassiveMenuId(null);
+    setCurrencyTxAmount('');
     setAllSkillsBonusDraft('');
   }, [activeCharacterId]);
 
@@ -590,15 +1237,22 @@ export function App(): React.JSX.Element {
   }, [weaponMenuId]);
 
   useEffect(() => {
-    if (!resourceMenuId) return;
+    if (!resourceMenuId && !passiveMenuId) return;
 
     const onPointerDown = (event: MouseEvent): void => {
-      if (!resourceMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (resourceMenuId && !resourceMenuRef.current?.contains(target)) {
         setResourceMenuId(null);
+      }
+      if (passiveMenuId && !passiveMenuRef.current?.contains(target)) {
+        setPassiveMenuId(null);
       }
     };
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setResourceMenuId(null);
+      if (event.key === 'Escape') {
+        setResourceMenuId(null);
+        setPassiveMenuId(null);
+      }
     };
 
     document.addEventListener('mousedown', onPointerDown);
@@ -607,7 +1261,27 @@ export function App(): React.JSX.Element {
       document.removeEventListener('mousedown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [resourceMenuId]);
+  }, [resourceMenuId, passiveMenuId]);
+
+  useEffect(() => {
+    if (!conditionMenuOpen) return;
+
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!conditionMenuRef.current?.contains(event.target as Node)) {
+        setConditionMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setConditionMenuOpen(false);
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [conditionMenuOpen]);
 
   const applyBonusToAllSkills = (): void => {
     const trimmed = allSkillsBonusDraft.trim();
@@ -1092,6 +1766,7 @@ export function App(): React.JSX.Element {
     species,
     class_name,
     subclass_name,
+    size = 'medium',
     stats,
     proficiencies,
     hp,
@@ -1099,13 +1774,46 @@ export function App(): React.JSX.Element {
     spells,
     weapon_attacks: weaponAttacks,
     custom_resources: customResources = [],
+    passive_traits: passiveTraits = [],
     inventory = [],
+    bag_of_holding: bagOfHolding = { enabled: false, items: [] },
+    currency = { pp: 0, gp: 0, sp: 0, cp: 0 },
   } = activeCharacter;
 
-  const totalInventoryWeight = inventory.reduce(
-    (acc, item) => acc + (item.weight ?? 0) * (item.quantity ?? 1),
-    0
-  );
+  const bagOfHoldingEnabled = Boolean(bagOfHolding.enabled);
+  const bagOfHoldingItems = bagOfHolding.items ?? [];
+  const rawTotalInventoryPounds =
+    calculateInventoryTotalPoundsRaw(inventory) +
+    (bagOfHoldingEnabled ? BAG_OF_HOLDING_SELF_WEIGHT_POUNDS : 0);
+  const rawTotalBagPounds = calculateInventoryTotalPoundsRaw(bagOfHoldingItems);
+  const carryingCapacity = calculateCarryingCapacity(stats.str, size);
+  const pushDragLiftLimit = roundWeight(carryingCapacity * 2);
+  const pushDragLiftLimitKg = poundsToKg(pushDragLiftLimit);
+
+  const totalCopper = currencyToCopper(currency);
+  const parsedCurrencyTxAmount =
+    currencyTxAmount.trim() === ''
+      ? 0
+      : Number.parseInt(currencyTxAmount, 10) || 0;
+  const currencyTxPreview =
+    parsedCurrencyTxAmount > 0
+      ? applyCurrencyTransaction({
+          currency,
+          coin: currencyTxCoin,
+          amount: parsedCurrencyTxAmount,
+          mode: currencyTxMode,
+        })
+      : null;
+
+  const submitCurrencyTransaction = (): void => {
+    if (!currencyTxPreview?.ok) return;
+    applyCurrencyChange({
+      coin: currencyTxCoin,
+      amount: parsedCurrencyTxAmount,
+      mode: currencyTxMode,
+    });
+    setCurrencyTxAmount('');
+  };
 
   const profBonus = calculateProficiencyBonus(level);
   const baseSpeedFeet = hp.speed ?? 30;
@@ -1271,6 +1979,19 @@ export function App(): React.JSX.Element {
               >
                 <Feather className="w-3.5 h-3.5 text-[var(--ochre)]" />
                 <span>Инвентарь и Заклинания</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveDockTab('notes')}
+                className={`rounded-full px-3 py-1.5 text-[10px] uppercase tracking-wider font-semibold inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                  activeDockTab === 'notes'
+                    ? 'bg-[var(--paper)] text-[var(--ink)] shadow-xs'
+                    : 'text-[var(--muted)] hover:text-[var(--ink)] hover:bg-[color-mix(in_srgb,var(--paper)_60%,transparent)]'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5 text-[var(--sea)]" />
+                <span>Заметки</span>
               </button>
 
               <button
@@ -1531,6 +2252,9 @@ export function App(): React.JSX.Element {
                       const abilitySkills = DND55E_SKILLS.filter(
                         (skill) => skill.ability === key
                       );
+                      const hasHeavyArmorDisadvantage = Boolean(
+                        proficiencies.heavyArmorStealthDisadvantage
+                      );
 
                       return (
                         <div
@@ -1562,15 +2286,38 @@ export function App(): React.JSX.Element {
                               )}
                             </div>
 
-                            <EditableNumberInput
-                              min={1}
-                              max={30}
-                              value={score}
-                              onChange={(val) => setStat(key, val)}
-                              title="Базовое значение характеристики (1–30)"
-                              ariaLabel={ABILITY_META[key].full}
-                              className="w-9 h-6 rounded-md bg-[var(--card)] text-center text-xs font-semibold text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
-                            />
+                            <div className="flex items-center gap-1.5">
+                              {key === 'dex' && (
+                                <button
+                                  type="button"
+                                  aria-pressed={hasHeavyArmorDisadvantage}
+                                  aria-label="Тяжёлая броня: помеха на Скрытность"
+                                  title={
+                                    hasHeavyArmorDisadvantage
+                                      ? 'Тяжёлая броня надета: помеха на Скрытность (нажмите, чтобы снять)'
+                                      : 'Тяжёлая броня: нет помехи на Скрытность (нажмите, чтобы отметить)'
+                                  }
+                                  onClick={toggleHeavyArmorStealthDisadvantage}
+                                  className={`w-6 h-6 rounded-md inline-flex items-center justify-center transition-all cursor-pointer ${
+                                    hasHeavyArmorDisadvantage
+                                      ? 'bg-[var(--clay)] text-[var(--paper)] shadow-xs'
+                                      : 'bg-[var(--card)] text-[var(--muted)] hover:text-[var(--ink)]'
+                                  }`}
+                                >
+                                  <ArmorIcon filled={hasHeavyArmorDisadvantage} />
+                                </button>
+                              )}
+
+                              <EditableNumberInput
+                                min={1}
+                                max={30}
+                                value={score}
+                                onChange={(val) => setStat(key, val)}
+                                title="Базовое значение характеристики (1–30)"
+                                ariaLabel={ABILITY_META[key].full}
+                                className="w-9 h-6 rounded-md bg-[var(--card)] text-center text-xs font-semibold text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)]"
+                              />
+                            </div>
                           </div>
 
                           {/* Saving Throw & Associated Skills */}
@@ -1631,6 +2378,10 @@ export function App(): React.JSX.Element {
                                     flatBonus: individualBonus + globalSkillBonus,
                                   });
                                   const rulesBase = totalMod - individualBonus - globalSkillBonus;
+                                  const isArmorStealthDisadvantage =
+                                    skill.key === 'stealth' && hasHeavyArmorDisadvantage;
+                                  const isSkillDisadvantaged =
+                                    checkHindrance.length > 0 || isArmorStealthDisadvantage;
 
                                   return (
                                     <div
@@ -1640,10 +2391,21 @@ export function App(): React.JSX.Element {
                                       <button
                                         type="button"
                                         onClick={() => cycleSkillProficiency(skill.key)}
+                                        title={
+                                          isArmorStealthDisadvantage
+                                            ? 'Помеха на Скрытность из-за тяжёлой брони'
+                                            : undefined
+                                        }
                                         className="min-w-0 flex-1 flex items-center gap-2 text-left group cursor-pointer"
                                       >
                                         <SkillDot rank={rank} />
-                                        <span className="text-[11px] uppercase tracking-wider text-[var(--ink)] font-medium truncate">
+                                        <span
+                                          className={`text-[11px] uppercase tracking-wider font-medium truncate transition-colors ${
+                                            isArmorStealthDisadvantage
+                                              ? 'text-[var(--clay)]'
+                                              : 'text-[var(--ink)]'
+                                          }`}
+                                        >
                                           {skill.label}
                                         </span>
                                       </button>
@@ -1656,13 +2418,15 @@ export function App(): React.JSX.Element {
                                           setSkillBonus(skill.key, next - rulesBase - globalSkillBonus)
                                         }
                                         title={
-                                          individualBonus === 0 && globalSkillBonus === 0
-                                            ? 'Нажмите, чтобы изменить модификатор навыка'
-                                            : `Дополнительно ${formatSigned(individualBonus + globalSkillBonus)}. Нажмите, чтобы изменить`
+                                          isArmorStealthDisadvantage
+                                            ? 'Помеха на Скрытность (тяжёлая броня). Нажмите, чтобы изменить модификатор навыка'
+                                            : individualBonus === 0 && globalSkillBonus === 0
+                                              ? 'Нажмите, чтобы изменить модификатор навыка'
+                                              : `Дополнительно ${formatSigned(individualBonus + globalSkillBonus)}. Нажмите, чтобы изменить`
                                         }
                                         ariaLabel={`Модификатор навыка ${skill.label}`}
                                         className={`w-11 bg-transparent text-right font-serif text-base font-semibold tabular-nums leading-none outline-none rounded-md cursor-text hover:bg-[var(--card)] focus:bg-[var(--card)] ${
-                                          checkHindrance.length > 0
+                                          isSkillDisadvantaged
                                             ? 'text-[var(--clay)]'
                                             : rank === 2
                                               ? 'text-[var(--ochre)]'
@@ -1683,6 +2447,91 @@ export function App(): React.JSX.Element {
                   </div>
                 ))}
               </div>
+            </section>
+
+            {/* Conditions Card */}
+            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
+              <h2 className="pl-2 text-[10px] uppercase tracking-[0.15em] font-medium leading-none text-[var(--muted)]">
+                СОСТОЯНИЯ
+              </h2>
+                  <div className="relative" ref={conditionMenuRef}>
+                    <button
+                      type="button"
+                      aria-label="Добавить состояние"
+                      aria-haspopup="listbox"
+                      aria-expanded={conditionMenuOpen}
+                      disabled={availableConditions.length === 0}
+                      onClick={() => setConditionMenuOpen((open) => !open)}
+                      className="w-full rounded-full border border-[var(--stone)] bg-[var(--paper)] px-3 py-1.5 flex items-center justify-between gap-2 text-left text-[10px] uppercase tracking-[0.12em] font-medium leading-none text-[var(--ink)] hover:border-[var(--muted)] outline-none cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-default"
+                    >
+                      <span>
+                        {availableConditions.length > 0 ? 'Добавить' : 'Все состояния'}
+                      </span>
+                      <ChevronUp
+                        className={`w-3.5 h-3.5 text-[var(--muted)] transition-transform ${
+                          conditionMenuOpen ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+
+                    {conditionMenuOpen && availableConditions.length > 0 && (
+                      <div
+                        role="listbox"
+                        aria-label="Список состояний"
+                        className="absolute left-0 right-0 bottom-full mb-1.5 z-50 max-h-60 overflow-y-auto rounded-2xl bg-[var(--paper)] p-1.5 shadow-lg ring-1 ring-[var(--stone)] space-y-0.5"
+                      >
+                        {availableConditions.map((condition) => (
+                          <button
+                            key={condition.key}
+                            type="button"
+                            role="option"
+                            aria-selected={false}
+                            onClick={() => {
+                              if (!activeConditions.includes(condition.key)) {
+                                updateHpAndCombat({
+                                  conditions: [...activeConditions, condition.key],
+                                });
+                              }
+                              setConditionMenuOpen(false);
+                            }}
+                            className="w-full text-left rounded-xl px-3 py-1.5 text-[11px] uppercase tracking-[0.1em] font-medium text-[var(--ink)] hover:bg-[var(--card)] transition-colors cursor-pointer"
+                          >
+                            {condition.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {activeConditions.some((key) =>
+                    DND55E_CONDITIONS.some((condition) => condition.key === key)
+                  ) && (
+                    <div className="flex flex-row flex-wrap gap-1.5">
+                      {activeConditions
+                        .filter((key) =>
+                          DND55E_CONDITIONS.some((condition) => condition.key === key)
+                        )
+                        .map((key) => {
+                        const label =
+                          DND55E_CONDITIONS.find((condition) => condition.key === key)?.label ??
+                          key;
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            aria-label={`Снять состояние ${label}`}
+                            onClick={() =>
+                              updateHpAndCombat({
+                                conditions: activeConditions.filter((item) => item !== key),
+                              })
+                            }
+                            className="rounded-full border border-[var(--clay)] bg-transparent px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] font-medium leading-none text-[var(--clay)] cursor-pointer hover:bg-[var(--clay)] hover:text-[var(--paper)]"
+                          >
+                            {label} ×
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
             </section>
 
             {/* Spell Slots Table Card (1st to 9th Circle) */}
@@ -1746,6 +2595,7 @@ export function App(): React.JSX.Element {
                     const slotData = spells.slots?.[slotKey] ?? { current: 0, max: 0 };
                     const maxSlots = slotData.max;
                     const spentSlots = Math.min(maxSlots, slotData.current);
+                    const availableSlots = Math.max(0, maxSlots - spentSlots);
 
                     return (
                       <div
@@ -1771,34 +2621,23 @@ export function App(): React.JSX.Element {
 
                         <div className="col-span-6 flex flex-wrap items-center gap-1.5">
                           {maxSlots > 0 ? (
-                            Array.from({ length: maxSlots }).map((_, idx) => {
-                              const isSpent = idx < spentSlots;
-                              return (
-                                <button
-                                  key={idx}
-                                  type="button"
-                                  onClick={() => {
-                                    const nextSpent =
-                                      isSpent && idx + 1 === spentSlots
-                                        ? idx
-                                        : idx + 1;
-                                    updateSpellSlot(slotLvl, {
-                                      current: nextSpent,
-                                    });
-                                  }}
-                                  title={
-                                    isSpent
-                                      ? 'Ячейка потрачена (нажмите, чтобы восстановить)'
-                                      : 'Ячейка доступна (нажмите, чтобы потратить)'
-                                  }
-                                  className={`w-3.5 h-3.5 rounded-full transition-all cursor-pointer ${
-                                    isSpent
-                                      ? 'bg-[var(--ink)]'
-                                      : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--ink)]'
-                                  }`}
-                                />
-                              );
-                            })
+                            <ChargePips
+                              available={availableSlots}
+                              max={maxSlots}
+                              sizeClass="w-3.5 h-3.5"
+                              onChange={(nextAvailable) =>
+                                updateSpellSlot(slotLvl, {
+                                  current: Math.max(0, maxSlots - nextAvailable),
+                                })
+                              }
+                              getAriaLabel={(idx, isAvailable) =>
+                                `Ячейка ${slotLvl} круга №${idx + 1} (${
+                                  isAvailable ? 'доступна' : 'потрачена'
+                                })`
+                              }
+                              availableTitle="Ячейка доступна (нажмите, чтобы потратить)"
+                              spentTitle="Ячейка потрачена (нажмите, чтобы восстановить)"
+                            />
                           ) : (
                             <span className="text-[10px] text-[color-mix(in_srgb,var(--muted)_60%,transparent)]">—</span>
                           )}
@@ -1928,14 +2767,16 @@ export function App(): React.JSX.Element {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+              {/* 4x2 Compact Bento Grid: Initiative, Passive Perception, AC, Speed, Hit Dice, Spell Save DC, Spell Attack, Death Saves */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {/* Initiative */}
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
                     ИНИЦИАТИВА
                   </span>
-                  <div className="flex items-end justify-between mt-2">
+                  <div className="flex items-end mt-1.5">
                     <span
-                      className={`font-serif text-3xl leading-none ${
+                      className={`font-serif text-2xl xl:text-[26px] leading-none ${
                         initiativeHindrance.length > 0 ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
                       }`}
                       title={
@@ -1946,69 +2787,43 @@ export function App(): React.JSX.Element {
                     >
                       {formatSigned(initiativeMod)}
                     </span>
-                    <span className="font-serif italic text-xs text-[var(--muted)]">Ловкость</span>
                   </div>
                 </div>
 
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px] gap-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
-                      КОСТИ ХИТОВ
-                    </span>
-                    <select
-                      aria-label="Кость хитов"
-                      value={hitDieType}
-                      onChange={(e) =>
-                        updateHpAndCombat({
-                          hit_die_type: e.target.value as 'd6' | 'd8' | 'd10' | 'd12',
-                        })
-                      }
-                      className="bg-[var(--card)] rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer"
-                    >
-                      <option value="d6">d6</option>
-                      <option value="d8">d8</option>
-                      <option value="d10">d10</option>
-                      <option value="d12">d12</option>
-                    </select>
-                  </div>
-                  <div className="flex items-end justify-between">
-                    <div className="flex items-end gap-1">
-                      <EditableNumberInput
-                        min={0}
-                        max={hitDiceMax}
-                        value={hitDiceCurrent}
-                        onChange={(val) => updateHpAndCombat({ hit_dice_current: val })}
-                        ariaLabel="Оставшиеся кости хитов"
-                        title="Сколько костей хитов ещё не потрачено"
-                        className="w-10 bg-transparent font-serif text-3xl leading-none text-[var(--ink)] outline-none"
-                      />
-                      <span className="font-serif text-sm text-[var(--muted)] mb-0.5">/ {hitDiceMax}</span>
-                    </div>
+                {/* Passive Wisdom (Perception) */}
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
+                    ПАССИВНАЯ МУДРОСТЬ
+                  </span>
+                  <div className="flex items-end mt-1.5">
                     <span
-                      className="font-serif italic text-[10px] text-[var(--muted)] text-right leading-tight max-w-[7.5rem]"
-                      title="Один долгий отдых возвращает половину костей (округление вверх). Второй долгий отдых возвращает остальные."
+                      className={`font-serif text-2xl xl:text-[26px] leading-none ${
+                        checkHindrance.length > 0 ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
+                      }`}
+                      title={
+                        checkHindrance.length > 0
+                          ? `Помеха на проверки: пассивное восприятие −5 (${conditionNames(checkHindrance)})`
+                          : undefined
+                      }
                     >
-                      1 отдых — половина, 2 — все
+                      {passiveShown}
                     </span>
                   </div>
                 </div>
-              </div>
 
-              {/* 2x3 Compact Bento Grid: AC, Speed, Prof Bonus, Passive Wisdom, Spell Save DC, Spell Attack */}
-              <div className="grid grid-cols-2 gap-3">
                 {/* Armor Class */}
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
                     КЛАСС ДОСПЕХА
                   </span>
-                  <div className="flex items-end justify-between mt-2">
+                  <div className="flex items-end mt-1.5">
                     <EditableNumberInput
                       min={0}
                       max={50}
                       value={armorClass}
                       onChange={(val) => updateHpAndCombat({ armor_class: val })}
                       ariaLabel="Класс доспеха"
-                      className={`w-14 bg-transparent font-serif text-3xl leading-none outline-none ${
+                      className={`w-12 bg-transparent font-serif text-2xl xl:text-[26px] leading-none outline-none ${
                         defenseHindrance.length > 0 ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
                       }`}
                       title={
@@ -2021,18 +2836,17 @@ export function App(): React.JSX.Element {
                           : undefined
                       }
                     />
-                    <span className="font-serif italic text-xs text-[var(--muted)]">КД</span>
                   </div>
                 </div>
 
                 {/* Speed */}
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
                     СКОРОСТЬ
                   </span>
-                  <div className="flex items-end justify-between mt-2">
+                  <div className="flex items-end justify-between gap-1 mt-1.5">
                     <span
-                      className={`font-serif text-3xl leading-none ${
+                      className={`font-serif text-2xl xl:text-[26px] leading-none whitespace-nowrap ${
                         speedAltered ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
                       }`}
                       title={
@@ -2044,9 +2858,9 @@ export function App(): React.JSX.Element {
                       }
                     >
                       {shownSpeed}
-                      <span className="text-sm font-sans text-[var(--muted)] ml-1">фт</span>
+                      <span className="text-xs font-sans text-[var(--muted)] ml-0.5">фт</span>
                     </span>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1 shrink-0">
                       <span className="text-[9px] uppercase tracking-wider text-[var(--muted)]">
                         База
                       </span>
@@ -2057,47 +2871,62 @@ export function App(): React.JSX.Element {
                         value={baseSpeedFeet}
                         onChange={(val) => updateHpAndCombat({ speed: val })}
                         ariaLabel="Базовая скорость"
-                        className="w-10 bg-[var(--card)] rounded px-1 py-0.5 text-center text-xs font-semibold text-[var(--ink)] outline-none"
+                        className="w-8 bg-[var(--card)] rounded px-1 py-0.5 text-center text-[11px] font-semibold text-[var(--ink)] outline-none"
                       />
                     </div>
                   </div>
                 </div>
 
-                {/* Passive Wisdom (Perception) */}
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
-                    ПАССИВНАЯ МУДРОСТЬ
-                  </span>
-                  <div className="flex items-end justify-between mt-2">
-                    <span
-                      className={`font-serif text-3xl leading-none ${
-                        checkHindrance.length > 0 ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
-                      }`}
-                      title={
-                        checkHindrance.length > 0
-                          ? `Помеха на проверки: пассивное восприятие −5 (${conditionNames(checkHindrance)})`
-                          : undefined
+                {/* Hit Dice */}
+                <div
+                  className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px] gap-1.5"
+                  title="Один долгий отдых возвращает половину костей (округление вверх). Второй долгий отдых возвращает остальные."
+                >
+                  <div className="flex items-start justify-between gap-1">
+                    <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
+                      КОСТИ ХИТОВ
+                    </span>
+                    <select
+                      aria-label="Кость хитов"
+                      value={hitDieType}
+                      onChange={(e) =>
+                        updateHpAndCombat({
+                          hit_die_type: e.target.value as 'd6' | 'd8' | 'd10' | 'd12',
+                        })
                       }
+                      className="bg-[var(--card)] rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer shrink-0"
                     >
-                      {passiveShown}
-                    </span>
-                    <span className="font-serif italic text-xs text-[var(--muted)]">
-                      Восприятие
-                    </span>
+                      <option value="d6">d6</option>
+                      <option value="d8">d8</option>
+                      <option value="d10">d10</option>
+                      <option value="d12">d12</option>
+                    </select>
+                  </div>
+                  <div className="flex items-end gap-1">
+                    <EditableNumberInput
+                      min={0}
+                      max={hitDiceMax}
+                      value={hitDiceCurrent}
+                      onChange={(val) => updateHpAndCombat({ hit_dice_current: val })}
+                      ariaLabel="Оставшиеся кости хитов"
+                      title="Сколько костей хитов ещё не потрачено"
+                      className="w-8 bg-transparent font-serif text-2xl xl:text-[26px] leading-none text-[var(--ink)] outline-none"
+                    />
+                    <span className="font-serif text-xs text-[var(--muted)] mb-0.5">/ {hitDiceMax}</span>
                   </div>
                 </div>
 
                 {/* Spell Save DC & Spellcasting Ability */}
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <div className="flex items-start justify-between gap-1">
+                    <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
                       СЛ ЗАКЛИНАНИЙ
                     </span>
-                    <span className="w-2 h-2 rounded-full bg-[var(--mist)]" />
+                    <span className="w-2 h-2 rounded-full bg-[var(--mist)] shrink-0 mt-0.5" />
                   </div>
 
-                  <div className="flex items-end justify-between mt-2">
-                    <span className="font-serif text-3xl leading-none text-[var(--ink)]">
+                  <div className="flex items-end justify-between gap-1 mt-1.5">
+                    <span className="font-serif text-2xl xl:text-[26px] leading-none text-[var(--ink)]">
                       {spellSaveDc !== null ? spellSaveDc : '—'}
                     </span>
 
@@ -2110,7 +2939,7 @@ export function App(): React.JSX.Element {
                           val === 'none' ? null : (val as AbilityKey)
                         );
                       }}
-                      className="bg-[var(--card)] rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer"
+                      className="bg-[var(--card)] rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer"
                     >
                       <option value="none">Нет</option>
                       <option value="int">ИНТ</option>
@@ -2120,82 +2949,18 @@ export function App(): React.JSX.Element {
                   </div>
                 </div>
 
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between gap-2">
-                  <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
-                    СПАСБРОСКИ ОТ СМЕРТИ
-                  </span>
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--sage)] font-semibold">
-                        Успехи
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        {[0, 1, 2].map((idx) => {
-                          const filled = idx < deathSaveSuccesses;
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              aria-label={`Успех спасброска от смерти ${idx + 1}`}
-                              onClick={() =>
-                                updateHpAndCombat({
-                                  death_save_successes:
-                                    filled && idx + 1 === deathSaveSuccesses ? idx : idx + 1,
-                                })
-                              }
-                              className={`w-4 h-4 rounded-full cursor-pointer transition-all ${
-                                filled
-                                  ? 'bg-[var(--sage)]'
-                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--sage)]'
-                              }`}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--clay)] font-semibold">
-                        Провалы
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        {[0, 1, 2].map((idx) => {
-                          const filled = idx < deathSaveFailures;
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              aria-label={`Провал спасброска от смерти ${idx + 1}`}
-                              onClick={() =>
-                                updateHpAndCombat({
-                                  death_save_failures:
-                                    filled && idx + 1 === deathSaveFailures ? idx : idx + 1,
-                                })
-                              }
-                              className={`w-4 h-4 rounded-full cursor-pointer transition-all ${
-                                filled
-                                  ? 'bg-[var(--clay)]'
-                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--clay)]'
-                              }`}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Spell Attack Bonus (+ к попаданию заклинанием) */}
-                <div className="bg-[var(--paper)] rounded-xl p-3 flex flex-col justify-between min-h-[82px]">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                {/* Spell Attack Bonus */}
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px]">
+                  <div className="flex items-start justify-between gap-1">
+                    <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
                       АТАКА ЗАКЛИНАНИЕМ
                     </span>
-                    <span className="w-2 h-2 rounded-full bg-[var(--mist)]" />
+                    <span className="w-2 h-2 rounded-full bg-[var(--mist)] shrink-0 mt-0.5" />
                   </div>
 
-                  <div className="flex items-end justify-between mt-2">
+                  <div className="flex items-end mt-1.5">
                     <span
-                      className={`font-serif text-3xl leading-none ${
+                      className={`font-serif text-2xl xl:text-[26px] leading-none ${
                         attackHindrance.length > 0 ? 'text-[var(--clay)]' : 'text-[var(--ink)]'
                       }`}
                       title={
@@ -2212,9 +2977,71 @@ export function App(): React.JSX.Element {
                         ? formatSigned(spellAttackBonus)
                         : '—'}
                     </span>
-                    <span className="font-serif italic text-xs text-[var(--muted)]">
-                      попадание
-                    </span>
+                  </div>
+                </div>
+
+                {/* Death Saves */}
+                <div className="bg-[var(--paper)] rounded-xl p-2.5 flex flex-col justify-between min-h-[72px] gap-1.5">
+                  <span className="text-[9px] uppercase tracking-[0.1em] text-[var(--muted)] font-medium leading-tight">
+                    СПАСБРОСКИ ОТ СМЕРТИ
+                  </span>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[9px] uppercase tracking-[0.08em] text-[var(--sage)] font-semibold">
+                        Успехи
+                      </span>
+                      <div className="flex items-center gap-1">
+                        {[0, 1, 2].map((idx) => {
+                          const filled = idx < deathSaveSuccesses;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              aria-label={`Успех спасброска от смерти ${idx + 1}`}
+                              onClick={() =>
+                                updateHpAndCombat({
+                                  death_save_successes:
+                                    filled && idx + 1 === deathSaveSuccesses ? idx : idx + 1,
+                                })
+                              }
+                              className={`w-3.5 h-3.5 rounded-full cursor-pointer transition-all ${
+                                filled
+                                  ? 'bg-[var(--sage)]'
+                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--sage)]'
+                              }`}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[9px] uppercase tracking-[0.08em] text-[var(--clay)] font-semibold">
+                        Провалы
+                      </span>
+                      <div className="flex items-center gap-1">
+                        {[0, 1, 2].map((idx) => {
+                          const filled = idx < deathSaveFailures;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              aria-label={`Провал спасброска от смерти ${idx + 1}`}
+                              onClick={() =>
+                                updateHpAndCombat({
+                                  death_save_failures:
+                                    filled && idx + 1 === deathSaveFailures ? idx : idx + 1,
+                                })
+                              }
+                              className={`w-3.5 h-3.5 rounded-full cursor-pointer transition-all ${
+                                filled
+                                  ? 'bg-[var(--clay)]'
+                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--clay)]'
+                              }`}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2654,33 +3481,21 @@ export function App(): React.JSX.Element {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-1.5 ml-auto">
-                        {Array.from({ length: resource.max }).map((_, idx) => {
-                          const isAvailable = idx < resource.current;
-                          return (
-                            <button
-                              key={idx}
-                              type="button"
-                              aria-label={`Использование ${idx + 1} (${
-                                isAvailable ? 'доступно' : 'потрачено'
-                              })`}
-                              onClick={() => {
-                                const nextCurrent =
-                                  isAvailable && idx + 1 === resource.current ? idx : idx + 1;
-                                updateCustomResource(resource.id, { current: nextCurrent });
-                              }}
-                              title={
-                                isAvailable
-                                  ? 'Доступно (нажмите, чтобы потратить)'
-                                  : 'Потрачено (нажмите, чтобы восстановить)'
-                              }
-                              className={`w-5 h-5 rounded-full transition-all cursor-pointer ${
-                                isAvailable
-                                  ? 'bg-[var(--ink)]'
-                                  : 'bg-[var(--card)] border border-[color-mix(in_srgb,var(--muted)_50%,transparent)] hover:border-[var(--ink)]'
-                              }`}
-                            />
-                          );
-                        })}
+                        <ChargePips
+                          available={resource.current}
+                          max={resource.max}
+                          sizeClass="w-5 h-5"
+                          onChange={(nextCurrent) =>
+                            updateCustomResource(resource.id, { current: nextCurrent })
+                          }
+                          getAriaLabel={(idx, isAvailable) =>
+                            `Использование ${idx + 1} (${
+                              isAvailable ? 'доступно' : 'потрачено'
+                            })`
+                          }
+                          availableTitle="Доступно (нажмите, чтобы потратить)"
+                          spentTitle="Потрачено (нажмите, чтобы восстановить)"
+                        />
                       </div>
                     </div>
                   </div>
@@ -2688,114 +3503,24 @@ export function App(): React.JSX.Element {
               })}
             </section>
 
-            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
-              <h2 className="pl-2 text-[10px] uppercase tracking-[0.15em] font-medium leading-none text-[var(--muted)]">
-                СОСТОЯНИЯ
-              </h2>
-                  <div className="relative">
-                    <select
-                      aria-label="Добавить состояние"
-                      value=""
-                      onChange={(e) => {
-                        const key = e.target.value;
-                        if (key === '' || activeConditions.includes(key)) return;
-                        updateHpAndCombat({ conditions: [...activeConditions, key] });
-                      }}
-                      className="w-full appearance-none rounded-full border border-[var(--muted)] bg-transparent pl-3 pr-7 py-1.5 text-left text-[10px] uppercase tracking-[0.12em] font-medium leading-none text-[var(--ink)] outline-none cursor-pointer"
-                    >
-                      {availableConditions.length > 0 ? (
-                        <option value="" hidden />
-                      ) : (
-                        <option value="">Все состояния</option>
-                      )}
-                      {availableConditions.map((condition) => (
-                        <option key={condition.key} value={condition.key}>
-                          {condition.label}
-                        </option>
-                      ))}
-                    </select>
-                    {availableConditions.length > 0 && (
-                      <span
-                        aria-hidden="true"
-                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-[0.12em] font-medium leading-none text-[var(--ink)]"
-                      >
-                        Добавить
-                      </span>
-                    )}
-                    <span
-                      aria-hidden="true"
-                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] leading-none text-[var(--muted)]"
-                    >
-                      ▾
-                    </span>
-                  </div>
-                  {activeConditions.some((key) =>
-                    DND55E_CONDITIONS.some((condition) => condition.key === key)
-                  ) && (
-                    <div className="flex flex-row flex-wrap gap-1.5">
-                      {activeConditions
-                        .filter((key) =>
-                          DND55E_CONDITIONS.some((condition) => condition.key === key)
-                        )
-                        .map((key) => {
-                        const label =
-                          DND55E_CONDITIONS.find((condition) => condition.key === key)?.label ??
-                          key;
-                        return (
-                          <button
-                            key={key}
-                            type="button"
-                            aria-label={`Снять состояние ${label}`}
-                            onClick={() =>
-                              updateHpAndCombat({
-                                conditions: activeConditions.filter((item) => item !== key),
-                              })
-                            }
-                            className="rounded-full border border-[var(--clay)] bg-transparent px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] font-medium leading-none text-[var(--clay)] cursor-pointer hover:bg-[var(--clay)] hover:text-[var(--paper)]"
-                          >
-                            {label} ×
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-            </section>
-
-          </div>
-        </main>
-        )}
-
-        {/* =================================================================== */}
-        {/* INVENTORY & SPELLS WORKSPACE                                        */}
-        {/* =================================================================== */}
-        {activeDockTab === 'inventory' && (
-          <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-            {/* Left Column: Inventory */}
+            {/* Passive Features & Traits (Пассивные умения и черты) */}
             <section className="bg-[var(--card)] rounded-2xl p-4 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
-                    ИНВЕНТАРЬ
-                  </h2>
-                  {totalInventoryWeight > 0 && (
-                    <span className="rounded-full bg-[var(--paper)] px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--muted)] tabular-nums">
-                      Вес: {Math.round(totalInventoryWeight * 10) / 10} фт
-                    </span>
-                  )}
-                </div>
-
+                <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                  Пассивные умения и черты
+                </h2>
                 <button
                   type="button"
-                  aria-label="Добавить предмет в инвентарь"
-                  title="Добавить предмет"
+                  aria-label="Добавить пассивное умение или черту"
+                  title="Добавить пассивное умение или черту"
+                  disabled={passiveTraits.length >= 30}
                   onClick={() =>
-                    addInventoryItem({
+                    addPassiveTrait({
                       name: '',
                       description: '',
-                      weight: 0,
                     })
                   }
-                  className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+                  className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
                 >
                   <span
                     aria-hidden="true"
@@ -2808,76 +3533,453 @@ export function App(): React.JSX.Element {
                 </button>
               </div>
 
-              {inventory.map((item) => (
-                <div
-                  key={item.id}
-                  className="bg-[var(--paper)] rounded-xl px-2.5 py-2 space-y-1.5"
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={item.name}
-                      maxLength={80}
-                      placeholder="Название предмета"
-                      aria-label="Название предмета"
-                      onChange={(e) =>
-                        updateInventoryItem(item.id, { name: e.target.value })
-                      }
-                      className="min-w-0 flex-1 bg-transparent font-serif text-base leading-none text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_50%,transparent)]"
-                    />
+              {passiveTraits.map((trait) => {
+                const description = trait.description.trim();
+                return (
+                  <div
+                    key={trait.id}
+                    className="bg-[var(--paper)] rounded-xl px-2.5 py-2 space-y-1.5"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <div
+                        className="relative shrink-0"
+                        ref={passiveMenuId === trait.id ? passiveMenuRef : undefined}
+                      >
+                        <button
+                          type="button"
+                          aria-label="Описание пассивного умения или черты"
+                          aria-expanded={passiveMenuId === trait.id}
+                          onClick={() =>
+                            setPassiveMenuId((current) =>
+                              current === trait.id ? null : trait.id
+                            )
+                          }
+                          className={`w-6 h-6 rounded-full inline-flex items-center justify-center cursor-pointer ${
+                            passiveMenuId === trait.id
+                              ? 'bg-[var(--ink)] text-[var(--paper)]'
+                              : 'text-[var(--muted)] hover:bg-[var(--card)] hover:text-[var(--ink)]'
+                          }`}
+                        >
+                          <MoreHorizontal className="w-4 h-4" />
+                        </button>
+                        {passiveMenuId === trait.id && (
+                          <div className="absolute left-0 top-full mt-1.5 z-50 w-56 rounded-2xl bg-[var(--paper)] p-2.5 shadow-lg ring-1 ring-[var(--stone)] space-y-2">
+                            <label className="block space-y-1">
+                              <span className="block text-[10px] uppercase tracking-[0.12em] text-[var(--muted)] font-medium">
+                                Описание
+                              </span>
+                              <textarea
+                                value={trait.description}
+                                maxLength={800}
+                                rows={4}
+                                placeholder="Эффект или заметка"
+                                aria-label="Описание пассивного умения или черты"
+                                onChange={(e) =>
+                                  updatePassiveTrait(trait.id, {
+                                    description: e.target.value,
+                                  })
+                                }
+                                className="w-full resize-y rounded-lg bg-[var(--card)] px-2 py-1.5 text-xs leading-snug text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_60%,transparent)]"
+                              />
+                            </label>
+                          </div>
+                        )}
+                      </div>
 
-                    {/* Weight Input */}
-                    <div className="flex items-center gap-1 shrink-0 bg-[var(--card)] rounded-full px-2 py-0.5">
                       <input
-                        type="number"
-                        min={0}
-                        step={0.1}
-                        value={item.weight === 0 ? '' : item.weight}
-                        placeholder="0"
-                        aria-label="Вес предмета в фунтах"
-                        title="Вес в фунтах"
-                        onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          updateInventoryItem(item.id, {
-                            weight: isNaN(val) ? 0 : Math.max(0, val),
-                          });
-                        }}
-                        className="w-9 bg-transparent text-center text-xs font-semibold tabular-nums text-[var(--ink)] outline-none"
+                        type="text"
+                        value={trait.name}
+                        maxLength={80}
+                        placeholder="Название умения или черты"
+                        aria-label="Название пассивного умения или черты"
+                        onChange={(e) =>
+                          updatePassiveTrait(trait.id, { name: e.target.value })
+                        }
+                        className="min-w-0 flex-1 bg-transparent font-serif text-base leading-none text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_50%,transparent)]"
                       />
-                      <span className="text-[9px] uppercase tracking-wider text-[var(--muted)] font-medium">
-                        фт
+
+                      <button
+                        type="button"
+                        aria-label={`Удалить умение ${trait.name || ''}`.trim()}
+                        onClick={() => {
+                          if (passiveMenuId === trait.id) setPassiveMenuId(null);
+                          deletePassiveTrait(trait.id);
+                        }}
+                        className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm leading-none flex items-center justify-center cursor-pointer transition-colors"
+                      >
+                        ×
+                      </button>
+                    </div>
+
+                    {description && (
+                      <p className="text-[11px] leading-snug text-[var(--muted)] whitespace-pre-wrap">
+                        {description}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
+
+          </div>
+        </main>
+        )}
+
+        {/* =================================================================== */}
+        {/* INVENTORY & SPELLS WORKSPACE                                        */}
+        {/* =================================================================== */}
+        {activeDockTab === 'inventory' && (
+          <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+            {/* Left Column: Carry Weight Calculator, Inventory & Bag of Holding */}
+            <div className="space-y-3">
+              {/* Standalone Compact D&D 5.5e Carry Weight Calculator */}
+              <section
+                title={`Тяга / подъём: до ${pushDragLiftLimit} фт (${pushDragLiftLimitKg} кг)`}
+                className="bg-[var(--card)] rounded-2xl px-3.5 py-2.5 space-y-1.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                    ВЕС ИНВЕНТАРЯ
+                  </h2>
+
+                  <label className="inline-flex items-center gap-1.5 rounded-full bg-[var(--paper)] px-2.5 py-0.5 text-[10px] text-[var(--muted)]">
+                    <span className="uppercase tracking-[0.12em] font-medium">
+                      Размер:
+                    </span>
+                    <select
+                      aria-label="Размер персонажа"
+                      title="Размер персонажа для расчёта грузоподъёмности (D&D 5.5e)"
+                      value={size}
+                      onChange={(e) =>
+                        updateIdentity({ size: e.target.value as CreatureSize })
+                      }
+                      className="bg-transparent text-[10px] uppercase tracking-wider font-semibold text-[var(--ink)] outline-none cursor-pointer"
+                    >
+                      {CREATURE_SIZE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label} (×{opt.multiplier})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <CarryWeightMeter
+                  rawUsedPounds={rawTotalInventoryPounds}
+                  capacityPounds={carryingCapacity}
+                  extraUsedNote={
+                    bagOfHoldingEnabled ? (
+                      <span
+                        title={`Активная Сумка хранения весит ${BAG_OF_HOLDING_SELF_WEIGHT_POUNDS} фт (${poundsToKg(BAG_OF_HOLDING_SELF_WEIGHT_POUNDS)} кг) независимо от содержимого`}
+                        className="rounded-full bg-[var(--paper)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--muted)]"
+                      >
+                        +{BAG_OF_HOLDING_SELF_WEIGHT_POUNDS} фт сумка
+                      </span>
+                    ) : undefined
+                  }
+                  overloadNote={
+                    rawTotalInventoryPounds <= pushDragLiftLimit
+                      ? `Макс. скорость 5 фт (тяга до ${pushDragLiftLimit} фт / ${pushDragLiftLimitKg} кг)`
+                      : `Превышен лимит тяги (${pushDragLiftLimit} фт / ${pushDragLiftLimitKg} кг)`
+                  }
+                />
+              </section>
+
+              {/* Main Character Inventory */}
+              <section className="bg-[var(--card)] rounded-2xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                    ИНВЕНТАРЬ
+                  </h2>
+
+                  <button
+                    type="button"
+                    aria-label="Добавить предмет в инвентарь"
+                    title="Добавить предмет"
+                    onClick={() =>
+                      addInventoryItem({
+                        name: '',
+                        description: '',
+                        weight: 0,
+                        weightUnit: 'lb',
+                        quantity: 1,
+                        chargesCurrent: 0,
+                        chargesMax: 0,
+                      })
+                    }
+                    className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-1/2 top-1/2 h-[1.5px] w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className="absolute left-1/2 top-1/2 h-2.5 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                    />
+                  </button>
+                </div>
+
+                <InventoryItemsList
+                  characterId={activeCharacter.id}
+                  items={inventory}
+                  onUpdate={updateInventoryItem}
+                  onDelete={deleteInventoryItem}
+                  onReorder={reorderInventoryItem}
+                />
+              </section>
+
+              {/* Bag of Holding (D&D 5.5e) */}
+              {!bagOfHoldingEnabled ? (
+                <div className="flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => setBagOfHoldingEnabled(true)}
+                    title={`Активировать Сумку хранения (D&D 5.5e: до ${BAG_OF_HOLDING_CAPACITY_POUNDS} фт / ${poundsToKg(BAG_OF_HOLDING_CAPACITY_POUNDS)} кг, ${BAG_OF_HOLDING_VOLUME_CUBIC_FEET} куб. фт, сама сумка весит ${BAG_OF_HOLDING_SELF_WEIGHT_POUNDS} фт)`}
+                    className="inline-flex items-center gap-2 rounded-full bg-[var(--card)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-[var(--ink)] px-3.5 py-1.5 text-xs font-medium tracking-wide transition-colors cursor-pointer"
+                  >
+                    <Backpack className="w-3.5 h-3.5" />
+                    <span>
+                      Сумка хранения
+                      {bagOfHoldingItems.length > 0
+                        ? ` (${bagOfHoldingItems.length})`
+                        : ''}
+                    </span>
+                  </button>
+                </div>
+              ) : (
+                <section className="bg-[var(--card)] rounded-2xl p-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Backpack className="w-3.5 h-3.5 text-[var(--muted)]" />
+                      <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                        СУМКА ХРАНЕНИЯ
+                      </h2>
+                      <span
+                        title={`Правила D&D 5.5e (2024): до ${BAG_OF_HOLDING_CAPACITY_POUNDS} фт (${poundsToKg(BAG_OF_HOLDING_CAPACITY_POUNDS)} кг) и ${BAG_OF_HOLDING_VOLUME_CUBIC_FEET} куб. фт (2×2×4 фт). Вес самой сумки — ${BAG_OF_HOLDING_SELF_WEIGHT_POUNDS} фт (${poundsToKg(BAG_OF_HOLDING_SELF_WEIGHT_POUNDS)} кг) независимо от содержимого. Достать предмет — действие «Использование».`}
+                        className="rounded-full bg-[var(--paper)] px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--muted)] tabular-nums"
+                      >
+                        {BAG_OF_HOLDING_CAPACITY_POUNDS} фт ·{' '}
+                        {BAG_OF_HOLDING_VOLUME_CUBIC_FEET} куб. фт
                       </span>
                     </div>
 
-                    {/* Delete button */}
-                    <button
-                      type="button"
-                      aria-label={`Удалить предмет ${item.name || ''}`.trim()}
-                      onClick={() => deleteInventoryItem(item.id)}
-                      className="w-6 h-6 rounded-full text-[var(--muted)] hover:bg-[var(--ink)] hover:text-[var(--paper)] text-sm leading-none flex items-center justify-center cursor-pointer transition-colors"
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setBagOfHoldingEnabled(false)}
+                        title="Деактивировать Сумку хранения (предметы сохранятся, +5 фт уберутся из веса персонажа)"
+                        className="rounded-full bg-[var(--paper)] px-2.5 py-1 text-[10px] uppercase tracking-wider font-medium text-[var(--muted)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                      >
+                        Скрыть
+                      </button>
+
+                      <button
+                        type="button"
+                        aria-label="Добавить предмет в Сумку хранения"
+                        title="Добавить предмет в Сумку хранения"
+                        onClick={() =>
+                          addBagOfHoldingItem({
+                            name: '',
+                            description: '',
+                            weight: 0,
+                            weightUnit: 'lb',
+                            quantity: 1,
+                            chargesCurrent: 0,
+                            chargesMax: 0,
+                          })
+                        }
+                        className="relative w-6 h-6 rounded-full bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="absolute left-1/2 top-1/2 h-[1.5px] w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                        />
+                        <span
+                          aria-hidden="true"
+                          className="absolute left-1/2 top-1/2 h-2.5 w-[1.5px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-current"
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Dedicated D&D 5.5e Bag of Holding Weight Calculator */}
+                  <div className="bg-[var(--paper)] rounded-xl px-3 py-2">
+                    <CarryWeightMeter
+                      rawUsedPounds={rawTotalBagPounds}
+                      capacityPounds={BAG_OF_HOLDING_CAPACITY_POUNDS}
+                      barTrackClass="bg-[var(--card)]"
+                      overloadNote={`Перегруз (> ${BAG_OF_HOLDING_CAPACITY_POUNDS} фт)! По правилам D&D 5.5e сумка рвётся, содержимое рассеивается на Астральном плане.`}
+                    />
+                  </div>
+
+                  <InventoryItemsList
+                    characterId={activeCharacter.id}
+                    items={bagOfHoldingItems}
+                    onUpdate={updateBagOfHoldingItem}
+                    onDelete={deleteBagOfHoldingItem}
+                    onReorder={reorderBagOfHoldingItem}
+                    emptyHint={`Вместимость до ${BAG_OF_HOLDING_CAPACITY_POUNDS} фт (${BAG_OF_HOLDING_VOLUME_CUBIC_FEET} куб. фт). Вес сумки — ${BAG_OF_HOLDING_SELF_WEIGHT_POUNDS} фт независимо от содержимого; достать предмет — действие «Использование».`}
+                  />
+                </section>
+              )}
+            </div>
+
+            {/* Right Column: Currency & Spells */}
+            <div className="space-y-3">
+              {/* Compact Currency Card */}
+              <section className="bg-[var(--card)] rounded-2xl px-3.5 py-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
+                    ЗОЛОТО И ВАЛЮТА
+                  </h2>
+                  <span
+                    title="1 ПМ = 10 ЗМ = 100 СМ = 1000 ММ"
+                    className="rounded-full bg-[var(--paper)] px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-[var(--muted)] tabular-nums"
+                  >
+                    Всего: {Math.round(totalCopper) / 100} зм
+                  </span>
+                </div>
+
+                {/* All 4 Currencies Display (Compact Horizontal Tiles) */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                  {CURRENCY_META.map((meta) => (
+                    <label
+                      key={meta.code}
+                      title={`${meta.label} (${meta.short}) — можно вписать количество`}
+                      className={`bg-[var(--paper)] rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-1.5 cursor-text ${
+                        meta.highlight
+                          ? 'ring-1 ring-[color-mix(in_srgb,var(--ochre)_45%,transparent)]'
+                          : ''
+                      }`}
                     >
-                      ×
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <span
+                          aria-hidden="true"
+                          className={`w-2 h-2 rounded-full ${meta.dotClass}`}
+                        />
+                        <span className="flex flex-col leading-none">
+                          <span
+                            className={`text-[10px] uppercase tracking-[0.1em] font-semibold ${
+                              meta.highlight
+                                ? 'text-[var(--ochre)]'
+                                : 'text-[var(--ink)]'
+                            }`}
+                          >
+                            {meta.short}
+                          </span>
+                          <span className="text-[8px] text-[var(--muted)] mt-0.5">
+                            {meta.label}
+                          </span>
+                        </span>
+                      </span>
+                      <EditableNumberInput
+                        min={0}
+                        max={9999999}
+                        value={currency[meta.code]}
+                        ariaLabel={`${meta.label} (${meta.short})`}
+                        title={`${meta.label} — можно вписать количество`}
+                        onChange={(val) => setCurrencyCoin(meta.code, val)}
+                        className="w-full min-w-0 bg-transparent text-right font-serif text-lg leading-none font-semibold text-[var(--ink)] outline-none tabular-nums"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                {/* Compact Deposit / Spend Calculator */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    submitCurrencyTransaction();
+                  }}
+                  className="bg-[var(--paper)] rounded-xl px-2 py-1.5 space-y-1.5"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="bg-[var(--card)] rounded-full p-0.5 inline-flex shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCurrencyTxMode('add')}
+                        className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider font-semibold transition-colors cursor-pointer ${
+                          currencyTxMode === 'add'
+                            ? 'bg-[var(--ink)] text-[var(--paper)]'
+                            : 'text-[var(--muted)] hover:text-[var(--ink)]'
+                        }`}
+                      >
+                        Внести
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrencyTxMode('spend')}
+                        className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider font-semibold transition-colors cursor-pointer ${
+                          currencyTxMode === 'spend'
+                            ? 'bg-[var(--clay)] text-[var(--paper)]'
+                            : 'text-[var(--muted)] hover:text-[var(--ink)]'
+                        }`}
+                      >
+                        Трата
+                      </button>
+                    </div>
+
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={currencyTxAmount}
+                      placeholder="Сумма"
+                      aria-label="Сумма операции"
+                      onChange={(e) =>
+                        setCurrencyTxAmount(e.target.value.replace(/[^0-9]/g, ''))
+                      }
+                      className="w-20 flex-1 min-w-[4.5rem] h-6 rounded-lg bg-[var(--card)] px-2 text-xs font-semibold tabular-nums text-[var(--ink)] outline-none focus:ring-1 focus:ring-[var(--ink)] placeholder:text-[color-mix(in_srgb,var(--muted)_55%,transparent)]"
+                    />
+
+                    <select
+                      value={currencyTxCoin}
+                      aria-label="Валюта операции"
+                      onChange={(e) =>
+                        setCurrencyTxCoin(e.target.value as CurrencyCode)
+                      }
+                      className="h-6 rounded-lg bg-[var(--card)] px-2 text-[11px] font-semibold text-[var(--ink)] outline-none cursor-pointer"
+                    >
+                      {CURRENCY_META.map((meta) => (
+                        <option key={meta.code} value={meta.code}>
+                          {meta.short} ({meta.label})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="submit"
+                      disabled={!currencyTxPreview?.ok}
+                      className="h-6 rounded-full bg-[var(--ink)] text-[var(--paper)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 text-[10px] uppercase tracking-wider font-semibold transition-opacity cursor-pointer shrink-0"
+                    >
+                      {currencyTxMode === 'add' ? '+ Внести' : '− Списать'}
                     </button>
                   </div>
 
-                  {/* Description Field */}
-                  <textarea
-                    value={item.description ?? ''}
-                    rows={1}
-                    maxLength={400}
-                    placeholder="Описание предмета..."
-                    aria-label="Описание предмета"
-                    onChange={(e) =>
-                      updateInventoryItem(item.id, { description: e.target.value })
-                    }
-                    className="w-full resize-y rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-xs leading-snug text-[var(--ink)] outline-none placeholder:text-[color-mix(in_srgb,var(--muted)_55%,transparent)] transition-all"
-                  />
-                </div>
-              ))}
-            </section>
+                  {currencyTxPreview && (
+                    <div className="text-[11px] leading-none tabular-nums">
+                      {currencyTxPreview.ok ? (
+                        <span className="text-[var(--muted)]">
+                          Станет:{' '}
+                          <strong className="font-semibold text-[var(--ink)]">
+                            {currencyTxPreview.next.pp} ПМ ·{' '}
+                            {currencyTxPreview.next.gp} ЗМ ·{' '}
+                            {currencyTxPreview.next.sp} СМ ·{' '}
+                            {currencyTxPreview.next.cp} ММ
+                          </strong>
+                        </span>
+                      ) : (
+                        <span className="text-[var(--clay)] font-medium">
+                          Недостаточно средств (всего {Math.round(totalCopper) / 100} зм)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </form>
+              </section>
 
-            {/* Right Column: Spells */}
-            <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
+              <section className="bg-[var(--card)] rounded-2xl p-4 space-y-3">
               <div className="flex items-center justify-between gap-2 border-b border-[var(--line)] pb-2.5">
                 <div className="flex items-baseline gap-2">
                   <h2 className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)] font-medium">
@@ -3088,7 +4190,8 @@ export function App(): React.JSX.Element {
                   })}
                 </div>
               )}
-            </section>
+              </section>
+            </div>
           </main>
         )}
 
@@ -3390,6 +4493,11 @@ export function App(): React.JSX.Element {
             </section>
           </main>
         )}
+
+        {/* =================================================================== */}
+        {/* NOTES WORKSPACE                                                     */}
+        {/* =================================================================== */}
+        {activeDockTab === 'notes' && <NotesPage />}
 
         {/* =================================================================== */}
         {/* MODAL: ADD SPELL FROM COMPENDIUM                                    */}
