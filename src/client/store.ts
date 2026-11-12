@@ -13,6 +13,7 @@ import {
   type CustomProficiencyEntry,
   type CustomResource,
   type InventoryItem,
+  type NoteDrawingStroke,
   type PassiveTrait,
   type ProficiencyRank,
   type SkillKey,
@@ -155,6 +156,26 @@ function moveItemById<T extends { id: string }>(
   return next;
 }
 
+function normalizeDrawingStrokes(raw: unknown): NoteDrawingStroke[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const strokes = raw
+    .map((entry) => entry as Partial<NoteDrawingStroke> | undefined)
+    .filter(
+      (s): s is Partial<NoteDrawingStroke> =>
+        Array.isArray(s?.points) && s.points.length > 0
+    )
+    .map((s) => ({
+      id: typeof s.id === 'string' && s.id ? s.id : crypto.randomUUID(),
+      color: typeof s.color === 'string' ? s.color : '#ff4d4f',
+      width: typeof s.width === 'number' ? s.width : 3,
+      points: (s.points as Array<{ x: unknown; y: unknown }>)
+        .filter((p) => typeof p?.x === 'number' && typeof p?.y === 'number')
+        .map((p) => ({ x: p.x as number, y: p.y as number })),
+    }))
+    .filter((s) => s.points.length > 0);
+  return strokes.length > 0 ? strokes : undefined;
+}
+
 function normalizeNoteCards(
   rawCards: unknown,
   legacyNotes: unknown
@@ -170,6 +191,9 @@ function normalizeNoteCards(
         title: typeof note?.title === 'string' ? note.title.slice(0, 120) : '',
         content:
           typeof note?.content === 'string' ? note.content.slice(0, 4000) : '',
+        image_data:
+          typeof note?.image_data === 'string' ? note.image_data : undefined,
+        drawing_strokes: normalizeDrawingStrokes(note?.drawing_strokes),
       };
     });
   }
@@ -410,6 +434,7 @@ interface CharacterStoreState {
     targetId: string,
     position: 'before' | 'after'
   ) => void;
+  setNoteDrawingStrokes: (id: string, strokes: NoteDrawingStroke[]) => void;
   saveActiveCharacter: () => Promise<void>;
 }
 
@@ -1404,6 +1429,10 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
               typeof note?.content === 'string'
                 ? note.content.slice(0, 4000)
                 : '',
+            image_data:
+              typeof note?.image_data === 'string'
+                ? note.image_data
+                : undefined,
           },
         ];
         return {
@@ -1458,6 +1487,18 @@ export const useCharacterStore = create<CharacterStoreState>((set, get) => {
           sourceId,
           targetId,
           position
+        );
+        return {
+          updated: { ...current, note_cards: nextCards },
+          patch: { note_cards: nextCards },
+        };
+      });
+    },
+
+    setNoteDrawingStrokes: (id, strokes) => {
+      applyActiveUpdate((current) => {
+        const nextCards = (current.note_cards ?? []).map((card) =>
+          card.id !== id ? card : { ...card, drawing_strokes: strokes }
         );
         return {
           updated: { ...current, note_cards: nextCards },
