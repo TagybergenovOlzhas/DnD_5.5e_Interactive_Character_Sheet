@@ -58,6 +58,7 @@ export function ImageNoteLightbox({
 
   const contentRef = useRef<HTMLDivElement>(null);
   const isPointerDownRef = useRef(false);
+  const isMiddlePanRef = useRef(false);
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(
     null
   );
@@ -109,7 +110,8 @@ export function ImageNoteLightbox({
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     isPointerDownRef.current = true;
 
-    if (tool === 'pan') {
+    if (tool === 'pan' || e.button === 1) {
+      isMiddlePanRef.current = e.button === 1;
       panStartRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
       return;
     }
@@ -128,7 +130,7 @@ export function ImageNoteLightbox({
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isPointerDownRef.current) return;
 
-    if (tool === 'pan' && panStartRef.current) {
+    if ((tool === 'pan' || isMiddlePanRef.current) && panStartRef.current) {
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
       setPan({ x: panStartRef.current.panX + dx, y: panStartRef.current.panY + dy });
@@ -157,9 +159,10 @@ export function ImageNoteLightbox({
 
   const handlePointerUp = () => {
     isPointerDownRef.current = false;
+    isMiddlePanRef.current = false;
     panStartRef.current = null;
 
-    if (tool === 'draw' && currentStroke && currentStroke.length > 1) {
+    if (tool === 'draw' && currentStroke && currentStroke.length >= 1) {
       onStrokesChange([
         ...strokes,
         {
@@ -358,31 +361,49 @@ export function ImageNoteLightbox({
                 viewBox={`0 0 ${width} ${height}`}
                 className="absolute inset-0 pointer-events-none"
               >
-                {strokes.map((stroke) => (
-                  <polyline
-                    key={stroke.id}
-                    points={stroke.points
-                      .map((p) => `${p.x * width},${p.y * height}`)
-                      .join(' ')}
-                    fill="none"
-                    stroke={stroke.color}
-                    strokeWidth={stroke.width}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                ))}
-                {currentStroke && (
-                  <polyline
-                    points={currentStroke
-                      .map((p) => `${p.x * width},${p.y * height}`)
-                      .join(' ')}
-                    fill="none"
-                    stroke={color}
-                    strokeWidth={brushWidth}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                {strokes.map((stroke) =>
+                  stroke.points.length === 1 && stroke.points[0] ? (
+                    <circle
+                      key={stroke.id}
+                      cx={stroke.points[0].x * width}
+                      cy={stroke.points[0].y * height}
+                      r={stroke.width / 2}
+                      fill={stroke.color}
+                    />
+                  ) : (
+                    <polyline
+                      key={stroke.id}
+                      points={stroke.points
+                        .map((p) => `${p.x * width},${p.y * height}`)
+                        .join(' ')}
+                      fill="none"
+                      stroke={stroke.color}
+                      strokeWidth={stroke.width}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  )
                 )}
+                {currentStroke &&
+                  (currentStroke.length === 1 && currentStroke[0] ? (
+                    <circle
+                      cx={currentStroke[0].x * width}
+                      cy={currentStroke[0].y * height}
+                      r={brushWidth / 2}
+                      fill={color}
+                    />
+                  ) : (
+                    <polyline
+                      points={currentStroke
+                        .map((p) => `${p.x * width},${p.y * height}`)
+                        .join(' ')}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={brushWidth}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  ))}
               </svg>
             )}
           </div>
