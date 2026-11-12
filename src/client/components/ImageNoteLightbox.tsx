@@ -84,18 +84,27 @@ export function ImageNoteLightbox({
 
   const eraseAt = (point: { x: number; y: number }) => {
     if (!naturalSize) return;
-    const hitRadius = Math.max(brushWidth, 10) / naturalSize.width;
+    // Hit-testing happens in actual image pixels (not normalized 0..1 units), because
+    // normalized x/y are fractions of different dimensions (width vs height) on a
+    // non-square image — comparing them directly with Math.hypot would distort
+    // distances along whichever axis is longer.
+    const { width: w, height: h } = naturalSize;
+    const px = point.x * w;
+    const py = point.y * h;
+    const hitRadius = Math.max(brushWidth, 10);
     const hit = strokes.find((stroke) => {
       if (erasedIdsRef.current.has(stroke.id)) return false;
       const first = stroke.points[0];
       if (stroke.points.length === 1 && first) {
-        return Math.hypot(first.x - point.x, first.y - point.y) <= hitRadius;
+        return Math.hypot(first.x * w - px, first.y * h - py) <= hitRadius;
       }
       for (let i = 0; i < stroke.points.length - 1; i++) {
         const a = stroke.points[i];
         const b = stroke.points[i + 1];
         if (!a || !b) continue;
-        if (distanceToSegment(point.x, point.y, a.x, a.y, b.x, b.y) <= hitRadius) {
+        if (
+          distanceToSegment(px, py, a.x * w, a.y * h, b.x * w, b.y * h) <= hitRadius
+        ) {
           return true;
         }
       }
@@ -125,6 +134,9 @@ export function ImageNoteLightbox({
     } else if (tool === 'erase') {
       erasedIdsRef.current = new Set();
       eraseAt(point);
+      if (erasedIdsRef.current.size > 0) {
+        onStrokesChange(strokes.filter((s) => !erasedIdsRef.current.has(s.id)));
+      }
     }
   };
 
