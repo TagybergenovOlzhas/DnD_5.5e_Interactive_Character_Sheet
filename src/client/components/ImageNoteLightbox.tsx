@@ -55,6 +55,7 @@ export function ImageNoteLightbox({
   const [currentStroke, setCurrentStroke] = useState<{ x: number; y: number }[] | null>(
     null
   );
+  const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
 
   const contentRef = useRef<HTMLDivElement>(null);
   const isPointerDownRef = useRef(false);
@@ -128,6 +129,9 @@ export function ImageNoteLightbox({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    const point = toNormalizedPoint(e.clientX, e.clientY);
+    setCursorPoint(point);
+
     if (!isPointerDownRef.current) return;
 
     if ((tool === 'pan' || isMiddlePanRef.current) && panStartRef.current) {
@@ -137,7 +141,6 @@ export function ImageNoteLightbox({
       return;
     }
 
-    const point = toNormalizedPoint(e.clientX, e.clientY);
     if (!point) return;
 
     if (tool === 'draw') {
@@ -333,14 +336,17 @@ export function ImageNoteLightbox({
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerUp}
+            onPointerLeave={(e) => {
+              handlePointerUp();
+              setCursorPoint(null);
+              e.preventDefault();
+            }}
             style={{
               position: 'relative',
               width: width || undefined,
               height: height || undefined,
               touchAction: 'none',
-              cursor:
-                tool === 'pan' ? 'grab' : tool === 'erase' ? 'cell' : 'crosshair',
+              cursor: tool === 'pan' ? 'grab' : 'none',
             }}
           >
             <img
@@ -404,6 +410,17 @@ export function ImageNoteLightbox({
                       strokeLinejoin="round"
                     />
                   ))}
+                {cursorPoint && (tool === 'draw' || tool === 'erase') && (
+                  <circle
+                    cx={cursorPoint.x * width}
+                    cy={cursorPoint.y * height}
+                    r={tool === 'erase' ? Math.max(brushWidth, 10) : brushWidth / 2}
+                    fill={tool === 'erase' ? 'rgba(255,255,255,0.15)' : 'none'}
+                    stroke={tool === 'erase' ? '#ffffff' : color}
+                    strokeWidth={Math.max(1, 1.5 / zoom)}
+                    pointerEvents="none"
+                  />
+                )}
               </svg>
             )}
           </div>
