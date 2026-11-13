@@ -315,10 +315,26 @@ export const BagOfHoldingSchema = z.object({
 });
 export type BagOfHolding = z.infer<typeof BagOfHoldingSchema>;
 
+export const NoteDrawingStrokeSchema = z.object({
+  id: z.string().min(1),
+  color: z.string().max(20),
+  width: z.number().min(0.5).max(40),
+  /** Points normalized to [0, 1] relative to the image's natural width/height. */
+  points: z
+    .array(z.object({ x: z.number(), y: z.number() }))
+    .min(1)
+    .max(4000),
+});
+export type NoteDrawingStroke = z.infer<typeof NoteDrawingStrokeSchema>;
+
 export const CharacterNoteSchema = z.object({
   id: z.string().min(1),
   title: z.string().max(120).default(''),
   content: z.string().max(4000).default(''),
+  /** Base64 data URL of an uploaded image, stored inline as a blob in the note's JSON. */
+  image_data: z.string().max(8_000_000).optional(),
+  /** Freehand drawing kept as a separate vector layer so it can always be erased without touching image_data. */
+  drawing_strokes: z.array(NoteDrawingStrokeSchema).max(500).optional(),
 });
 export type CharacterNote = z.infer<typeof CharacterNoteSchema>;
 
